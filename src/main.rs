@@ -247,6 +247,11 @@ Options
         {
             directory_shares.push(share)
         }
+        // Bind-mount linux ripgrep over shared macos binary to ensure compatibility
+        login_actions.push(Send(
+            "if [ -f /root/.gemini/tmp/bin/rg ] && [ -f /usr/bin/rg ]; then mount --bind /usr/bin/rg /root/.gemini/tmp/bin/rg; fi"
+                .to_string()
+        ));
     }
 
     for spec in &args.mounts {
