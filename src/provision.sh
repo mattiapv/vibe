@@ -32,6 +32,9 @@ echo "export IS_SANDBOX=1" >> .bashrc
 # Set this environment variable to prevent the Gemini CLI from failing to identify the sandbox command
 echo "export GEMINI_SANDBOX=false" >> .bashrc
 
+# Enable true color support in the terminal
+echo "export COLORTERM=truecolor" >> .bashrc
+
 # Shutdown the VM when you logout
 cat > .bash_logout <<EOF
 systemctl poweroff
