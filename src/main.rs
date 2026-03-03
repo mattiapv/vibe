@@ -28,6 +28,8 @@ use objc2::{AnyThread, rc::Retained, runtime::ProtocolObject};
 use objc2_foundation::*;
 use objc2_virtualization::*;
 
+mod vm_registry;
+
 const DEBIAN_COMPRESSED_DISK_URL: &str = "https://cloud.debian.org/images/cloud/trixie/20260112-2355/debian-13-nocloud-arm64-20260112-2355.tar.xz";
 const DEBIAN_COMPRESSED_SHA: &str = "6ab9be9e6834adc975268367f2f0235251671184345c34ee13031749fdfbf66fe4c3aafd949a2d98550426090e9ac645e79009c51eb0eefc984c15786570bb38";
 const DEBIAN_COMPRESSED_SIZE_BYTES: u64 = 280901576;
@@ -133,6 +135,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "Vibe is a quick way to spin up a Linux virtual machine on Mac to sandbox LLM agents.
 
 vibe [OPTIONS] [disk-image.raw]
+vibe ls
 
 Options
 
@@ -148,9 +151,24 @@ Options
   --send <some-command>                                     Type `some-command` followed by newline into the VM.
   --expect <string> [timeout-seconds]                       Wait for `string` to appear in console output before executing next `--script` or `--send`.
                                                             If `string` does not appear within timeout (default 30 seconds), shutdown VM with error.
+
+Commands
+
+  ls                                                        List tracked VMs from ~/.cache/vibe/vm_registry.json
+                                                            and optionally delete selected entries and .vibe folders.
 "
         );
         std::process::exit(0);
+    }
+
+    let home = env::var("HOME").map(PathBuf::from)?;
+    let cache_home = env::var("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home.join(".cache"));
+    let cache_dir = cache_home.join("vibe");
+
+    if args.list {
+        return run_vm_registry_ls(&cache_dir);
     }
 
     ensure_signed();
@@ -162,11 +180,6 @@ Options
         .to_string_lossy()
         .into_owned();
 
-    let home = env::var("HOME").map(PathBuf::from)?;
-    let cache_home = env::var("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| home.join(".cache"));
-    let cache_dir = cache_home.join("vibe");
     let guest_mise_cache = cache_dir.join(".guest-mise-cache");
 
     let instance_dir = project_root.join(".vibe");
@@ -222,7 +235,7 @@ Options
 
         directory_shares.push(
             DirectoryShare::new(
-                project_root,
+                project_root.clone(),
                 PathBuf::from("/root/").join(project_name),
                 false,
             )
@@ -269,6 +282,8 @@ Options
     // Any user-provided login actions must come after our system ones
     login_actions.extend(args.login_actions);
 
+    vm_registry::record_vm_launch(&cache_dir, &project_root)?;
+
     run_vm(
         &disk_path,
         &login_actions,
@@ -280,6 +295,7 @@ Options
 
 struct CliArgs {
     disk: Option<PathBuf>,
+    list: bool,
     version: bool,
     help: bool,
     no_default_mounts: bool,
@@ -298,6 +314,7 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
 
     let mut parser = lexopt::Parser::from_env();
     let mut disk = None;
+    let mut list = false;
     let mut version = false;
     let mut help = false;
     let mut no_default_mounts = false;
@@ -348,6 +365,16 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 login_actions.push(Expect { text, timeout });
             }
             Value(value) => {
+                if value == "ls" {
+                    if list || disk.is_some() {
+                        return Err("Command 'ls' may only be provided once".into());
+                    }
+                    list = true;
+                    continue;
+                }
+                if list {
+                    return Err("Disk path cannot be provided with command 'ls'".into());
+                }
                 if disk.is_some() {
                     return Err("Only one disk path may be provided".into());
                 }
@@ -357,8 +384,19 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
         }
     }
 
+    if list
+        && (no_default_mounts
+            || !mounts.is_empty()
+            || !login_actions.is_empty()
+            || cpu_count != DEFAULT_CPU_COUNT
+            || ram_bytes != DEFAULT_RAM_BYTES)
+    {
+        return Err("Command 'ls' cannot be combined with VM boot options".into());
+    }
+
     Ok(CliArgs {
         disk,
+        list,
         version,
         help,
         no_default_mounts,
@@ -367,6 +405,114 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
         cpu_count,
         ram_bytes,
     })
+}
+
+fn run_vm_registry_ls(cache_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    fs::create_dir_all(cache_dir)?;
+    let records = vm_registry::list_vm_records(cache_dir)?;
+
+    if records.is_empty() {
+        println!("No tracked VMs in {}.", cache_dir.display());
+        return Ok(());
+    }
+
+    println!("Tracked VMs:");
+    println!("{:<4} {:<10} Folder", "ID", "Created At");
+    println!("{:-<4} {:-<10} {:-<6}", "", "", "");
+    for (idx, record) in records.iter().enumerate() {
+        println!(
+            "{:<4} {:<10} {}",
+            idx + 1,
+            record.created_at,
+            record.folder_path
+        );
+    }
+
+    println!();
+    println!("Delete entries? Type indexes like '1 3', 'all'/'a', or press Enter to keep all:");
+    print!("> ");
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    let selected = if input.eq_ignore_ascii_case("all") || input.eq_ignore_ascii_case("a") {
+        (0..records.len()).collect::<Vec<_>>()
+    } else {
+        parse_selection_indexes(input, records.len())?
+    };
+
+    let mut deleted_folders = Vec::with_capacity(selected.len());
+    for idx in selected {
+        let record = &records[idx];
+        let project_dir = PathBuf::from(&record.folder_path);
+        let vibe_dir = project_dir.join(".vibe");
+        let instance_raw = vibe_dir.join("instance.raw");
+
+        if !project_dir.exists() {
+            println!(
+                "Project folder missing, skipping filesystem delete: {}",
+                project_dir.display()
+            );
+        } else if !project_dir.is_dir() {
+            return Err(format!(
+                "Refusing to operate on non-directory project path at {}",
+                project_dir.display()
+            )
+            .into());
+        } else if vibe_dir.is_dir() {
+            if instance_raw.is_file() {
+                fs::remove_dir_all(&vibe_dir)?;
+                println!("Deleted folder: {}", vibe_dir.display());
+            } else {
+                println!(
+                    "Skipping folder delete (instance.raw missing): {}",
+                    vibe_dir.display()
+                );
+            }
+        } else if vibe_dir.exists() {
+            return Err(format!(
+                "Refusing to delete non-directory path at {}",
+                vibe_dir.display()
+            )
+            .into());
+        } else {
+            println!("Folder already missing: {}", vibe_dir.display());
+        }
+        deleted_folders.push(record.folder_path.clone());
+    }
+
+    vm_registry::delete_vm_records(cache_dir, &deleted_folders)?;
+    println!("Deleted {} registry entr(y/ies).", deleted_folders.len());
+    Ok(())
+}
+
+fn parse_selection_indexes(
+    input: &str,
+    max: usize,
+) -> Result<Vec<usize>, Box<dyn std::error::Error>> {
+    let mut indexes = Vec::new();
+    for token in input.split_whitespace() {
+        let idx: usize = token
+            .parse()
+            .map_err(|_| format!("Invalid index '{}'", token))?;
+        if idx == 0 || idx > max {
+            return Err(format!("Index out of range: {}", idx).into());
+        }
+        let zero_based = idx - 1;
+        if !indexes.contains(&zero_based) {
+            indexes.push(zero_based);
+        }
+    }
+
+    if indexes.is_empty() {
+        return Err("No indexes were provided".into());
+    }
+
+    Ok(indexes)
 }
 
 fn script_command_from_path(
