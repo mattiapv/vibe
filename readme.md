@@ -72,6 +72,20 @@ If you use [mise-en-place](https://mise.jdx.dev/):
 
     mise use github:lynaghk/vibe@latest
 
+Useful `mise` commands:
+
+    # Upgrade a package, e.g. Gemini CLI
+    mise upgrade npm:@google/gemini-cli
+
+    # Use Node.js 25 globally
+    mise use -g node@25
+
+    # Add a global npm package
+    mise use -g npm:<package-name>
+
+    # Show installed tools and versions
+    mise list
+
 I'm not making formal releases or keeping a change log.
 I recommend reading the commit history and pinning to a specific version.
 
