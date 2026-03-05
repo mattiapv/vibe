@@ -58,6 +58,9 @@ curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --component "rust
 curl https://mise.run | sh
 echo 'eval "$(~/.local/bin/mise activate bash)"' >> .bashrc
 
+# Install Claude Code
+curl -fsSL https://claude.ai/install.sh | bash
+
 export PATH="$HOME/.local/bin:$PATH"
 eval "$(mise activate bash)"
 
@@ -74,7 +77,6 @@ cat > .config/mise/config.toml <<MISE
     uv = "0.9.25"
     node = "24.13.0"
     "npm:@openai/codex" = "latest"
-    "npm:@anthropic-ai/claude-code" = "latest"
     "npm:@google/gemini-cli" = "latest"
 MISE
 
