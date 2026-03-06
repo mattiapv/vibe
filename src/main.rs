@@ -258,7 +258,7 @@ Commands
         // Discourage read/write of project dir subfolders within the VM.
         // Note that this isn't secure, since the VM runs as root and could unmount this.
         // I couldn't find an alternative way to do this --- the MacOS sandbox doesn't apply to the Apple Virtualization system =(
-        for subfolder in [".git", ".vibe"] {
+        for subfolder in [".vibe"] {
             if project_root.join(subfolder).exists() {
                 login_actions.push(Send(format!(r" mount -t tmpfs tmpfs {}", subfolder)))
             }
