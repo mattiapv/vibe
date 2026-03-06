@@ -16,6 +16,7 @@ Host                                      Guest                    Mode
 ----------------------------------------  -----------------------  ----------
 /Users/dev/work/my-project                /root/my-project         read-write
 /Users/dev/.cache/vibe/.guest-mise-cache  /root/.local/share/mise  read-write
+/Users/dev/.cache/vibe/.guest-claude-versions  /root/.local/share/claude  read-write
 /Users/dev/.cache/vibe/claude-config      /root/.claude-config     read-write
 /Users/dev/.m2                            /root/.m2                read-write
 /Users/dev/.cargo/registry                /root/.cargo/registry    read-write
@@ -125,6 +126,7 @@ Invoking vibe without a disk image:
 
 - shares the current directory with the VM
 - shares package manager cache directories with the VM, so that packages are not re-downloaded
+- shares `~/.cache/vibe/.guest-claude-versions` with the VM at `/root/.local/share/claude`
 - shares `~/.cache/vibe/claude-config` with the VM at `/root/.claude-config`
 - shares the `~/.codex` directory with the VM, so you can use OpenAI's [codex](https://openai.com/codex/)
 - shares the `~/.claude` directory with the VM, so you can use Anthropic's [claude](https://claude.com/product/claude-code)
@@ -132,7 +134,8 @@ Invoking vibe without a disk image:
 
 The first time you run `vibe`, a Debian Linux image is downloaded to `~/.cache/vibe/`, configured with basic tools like gcc, [mise-en-place](https://mise.jdx.dev/), ripgrep, rust, etc., and saved as `default.raw`.
 On each VM boot, if `~/.claude.json` exists on the host, it is copied to `~/.cache/vibe/claude-config/claude.json`.
-On VM boot, if `/root/.claude-config/claude.json` exists, it is copied to `/root/claude.json`.
+On VM boot, if shared Claude versions exist, `/root/.local/bin/claude` is relinked to the latest version in `/root/.local/share/claude/versions`.
+On VM boot, if `/root/.claude-config/claude.json` exists, it is copied to `/root/.claude.json`.
 (See [provision.sh](/src/provision.sh) for details.)
 
 Then when you run `vibe` in a project directory, it copies this default image to `.vibe/instance.raw`, boots it up, and attaches your terminal to this VM.
