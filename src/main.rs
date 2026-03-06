@@ -184,9 +184,7 @@ Commands
 
     let guest_mise_cache = cache_dir.join(".guest-mise-cache");
     let guest_claude_versions_cache = cache_dir.join(".guest-claude-versions");
-    let claude_config_cache = cache_dir.join("claude-config");
-    let host_claude_json = home.join(".claude.json");
-    let cached_claude_json = claude_config_cache.join("claude.json");
+    let guest_claude_config_cache = cache_dir.join(".guest-claude-config");
 
     let instance_dir = project_root.join(".vibe");
 
@@ -204,12 +202,7 @@ Commands
     fs::create_dir_all(&cache_dir)?;
     fs::create_dir_all(&guest_mise_cache)?;
     fs::create_dir_all(&guest_claude_versions_cache)?;
-    fs::create_dir_all(&claude_config_cache)?;
-
-    // Refresh claude-config from ~/.claude.json on each boot, if present.
-    if host_claude_json.exists() {
-        fs::copy(&host_claude_json, &cached_claude_json)?;
-    }
+    fs::create_dir_all(&guest_claude_config_cache)?;
 
     let mise_directory_share =
         DirectoryShare::new(guest_mise_cache, "/root/.local/share/mise".into(), false)?;
@@ -218,8 +211,11 @@ Commands
         "/root/.local/share/claude".into(),
         false,
     )?;
-    let claude_config_directory_share =
-        DirectoryShare::new(claude_config_cache, "/root/.claude-config".into(), false)?;
+    let claude_config_directory_share = DirectoryShare::new(
+        guest_claude_config_cache,
+        "/root/.claude-config".into(),
+        false,
+    )?;
 
     let disk_path = if let Some(path) = args.disk {
         if !path.exists() {
@@ -234,6 +230,7 @@ Commands
             &[
                 mise_directory_share.clone(),
                 claude_versions_directory_share.clone(),
+                claude_config_directory_share.clone(),
             ],
         )?;
         ensure_instance_disk(&instance_raw, &default_raw)?;
@@ -1322,24 +1319,10 @@ fn run_vm(
             all_login_actions.push(Send(format!(" mount --bind {} {}", staging, guest)));
         }
 
-        let has_claude_config_share = directory_shares
-            .iter()
-            .any(|share| share.guest == PathBuf::from("/root/.claude-config"));
-        let has_claude_versions_share = directory_shares
-            .iter()
-            .any(|share| share.guest == PathBuf::from("/root/.local/share/claude"));
-        if has_claude_versions_share {
-            all_login_actions.push(Send(
+        all_login_actions.push(Send(
                 " if [ -d /root/.local/share/claude/versions ]; then latest=\"$(ls -1 /root/.local/share/claude/versions | sort -V | tail -n1)\"; if [ -n \"$latest\" ]; then ln -sfn \"/root/.local/share/claude/versions/$latest\" /root/.local/bin/claude; fi; fi"
                     .to_string(),
-            ));
-        }
-        if has_claude_config_share {
-            all_login_actions.push(Send(
-                " if [ -f /root/.claude-config/claude.json ]; then cp /root/.claude-config/claude.json /root/.claude.json; fi"
-                    .to_string(),
-            ));
-        }
+        ));
     }
 
     for a in login_actions {

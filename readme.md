@@ -12,17 +12,17 @@ $ vibe
   ░▒▓█▓▓█▓▒░ ░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░
    ░▒▓██▓▒░  ░▒▓█▓▒░▒▓███████▓▒░░▒▓████████▓▒░
 
-Host                                      Guest                    Mode
-----------------------------------------  -----------------------  ----------
-/Users/dev/work/my-project                /root/my-project         read-write
-/Users/dev/.cache/vibe/.guest-mise-cache  /root/.local/share/mise  read-write
-/Users/dev/.cache/vibe/.guest-claude-versions  /root/.local/share/claude  read-write
-/Users/dev/.cache/vibe/claude-config      /root/.claude-config     read-write
-/Users/dev/.m2                            /root/.m2                read-write
-/Users/dev/.cargo/registry                /root/.cargo/registry    read-write
-/Users/dev/.codex                         /root/.codex             read-write
-/Users/dev/.claude                        /root/.claude            read-write
-/Users/dev/.gemini                        /root/.gemini            read-write
+Host                                           Guest                        Mode
+---------------------------------------------  ---------------------------  ----------
+/Users/dev/work/my-project                     /root/my-project             read-write
+/Users/dev/.cache/vibe/.guest-mise-cache       /root/.local/share/mise      read-write
+/Users/dev/.cache/vibe/.guest-claude-versions  /root/.local/share/claude    read-write
+/Users/dev/.cache/vibe/.guest-claude-config    /root/.claude-config         read-write
+/Users/dev/.m2                                 /root/.m2                    read-write
+/Users/dev/.cargo/registry                     /root/.cargo/registry        read-write
+/Users/dev/.codex                              /root/.codex                 read-write
+/Users/dev/.claude                             /root/.claude                read-write
+/Users/dev/.gemini                             /root/.gemini                read-write
 
 root@vibe:~/my-project#
 ```
@@ -127,13 +127,12 @@ Invoking vibe without a disk image:
 - shares the current directory with the VM
 - shares package manager cache directories with the VM, so that packages are not re-downloaded
 - shares `~/.cache/vibe/.guest-claude-versions` with the VM at `/root/.local/share/claude`
-- shares `~/.cache/vibe/claude-config` with the VM at `/root/.claude-config`
+- shares `~/.cache/vibe/.guest-claude-config` with the VM at `/root/.claude-config`
 - shares the `~/.codex` directory with the VM, so you can use OpenAI's [codex](https://openai.com/codex/)
 - shares the `~/.claude` directory with the VM, so you can use Anthropic's [claude](https://claude.com/product/claude-code)
 - shares the `~/.gemini` directory with the VM, so you can use Google's [gemini-cli](https://github.com/google-gemini/gemini-cli)
 
 The first time you run `vibe`, a Debian Linux image is downloaded to `~/.cache/vibe/`, configured with basic tools like gcc, [mise-en-place](https://mise.jdx.dev/), ripgrep, rust, etc., and saved as `default.raw`.
-On each VM boot, if `~/.claude.json` exists on the host, it is copied to `~/.cache/vibe/claude-config/claude.json`.
 On VM boot, if shared Claude versions exist, `/root/.local/bin/claude` is relinked to the latest version in `/root/.local/share/claude/versions`.
 On VM boot, if `/root/.claude-config/claude.json` exists, it is copied to `/root/.claude.json`.
 (See [provision.sh](/src/provision.sh) for details.)
@@ -170,6 +169,7 @@ There is no centralized registry of VMs --- if you want to delete a VM, just del
   However, you can paper this over with a shell script wrapper --- see [this issue](https://github.com/lynaghk/vibe/issues/18) for an example.
   (Also: Wild to me that Anthropic puts both a file and a folder in your home directory --- how rude!)
 
+- Claude Code requires at least 4 GB of RAM to update. Use vibe --ram 4096 when updating.
 
 ## Alternatives
 
