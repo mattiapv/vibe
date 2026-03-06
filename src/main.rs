@@ -138,6 +138,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 vibe [OPTIONS] [disk-image.raw]
 vibe ls
+vibe recreate
 
 Options
 
@@ -158,6 +159,7 @@ Commands
 
   ls                                                        List tracked VMs from ~/.cache/vibe/vm_registry.json
                                                             and optionally delete selected entries and .vibe folders.
+  recreate                                                  Delete cached default image and all tracked .vibe folders, then exit.
 "
         );
         std::process::exit(0);
@@ -171,6 +173,14 @@ Commands
 
     if args.list {
         return run_vm_registry_ls(&cache_dir);
+    }
+
+    if args.recreate {
+        let project_root = env::current_dir()?;
+        let default_raw = cache_dir.join("default.raw");
+        let current_instance_raw = project_root.join(".vibe").join("instance.raw");
+        run_recreate(&cache_dir, &default_raw, &current_instance_raw)?;
+        return Ok(());
     }
 
     ensure_signed();
@@ -318,6 +328,7 @@ Commands
 struct CliArgs {
     disk: Option<PathBuf>,
     list: bool,
+    recreate: bool,
     version: bool,
     help: bool,
     no_default_mounts: bool,
@@ -337,6 +348,7 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut parser = lexopt::Parser::from_env();
     let mut disk = None;
     let mut list = false;
+    let mut recreate = false;
     let mut version = false;
     let mut help = false;
     let mut no_default_mounts = false;
@@ -388,14 +400,24 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
             }
             Value(value) => {
                 if value == "ls" {
-                    if list || disk.is_some() {
+                    if list || recreate || disk.is_some() {
                         return Err("Command 'ls' may only be provided once".into());
                     }
                     list = true;
                     continue;
                 }
+                if value == "recreate" {
+                    if recreate || list || disk.is_some() {
+                        return Err("Command 'recreate' may only be provided once".into());
+                    }
+                    recreate = true;
+                    continue;
+                }
                 if list {
                     return Err("Disk path cannot be provided with command 'ls'".into());
+                }
+                if recreate {
+                    return Err("Disk path cannot be provided with command 'recreate'".into());
                 }
                 if disk.is_some() {
                     return Err("Only one disk path may be provided".into());
@@ -415,10 +437,20 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
     {
         return Err("Command 'ls' cannot be combined with VM boot options".into());
     }
+    if recreate
+        && (no_default_mounts
+            || !mounts.is_empty()
+            || !login_actions.is_empty()
+            || cpu_count != DEFAULT_CPU_COUNT
+            || ram_bytes != DEFAULT_RAM_BYTES)
+    {
+        return Err("Command 'recreate' cannot be combined with VM boot options".into());
+    }
 
     Ok(CliArgs {
         disk,
         list,
+        recreate,
         version,
         help,
         no_default_mounts,
@@ -509,6 +541,42 @@ fn run_vm_registry_ls(cache_dir: &Path) -> Result<(), Box<dyn std::error::Error>
 
     vm_registry::delete_vm_records(cache_dir, &deleted_folders)?;
     println!("Deleted {} registry entr(y/ies).", deleted_folders.len());
+    Ok(())
+}
+
+fn run_recreate(
+    cache_dir: &Path,
+    default_raw: &Path,
+    current_instance_raw: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    fs::create_dir_all(cache_dir)?;
+
+    let records = vm_registry::list_vm_records(cache_dir)?;
+    let mut removed_folders = Vec::new();
+    for record in &records {
+        let project_dir = PathBuf::from(&record.folder_path);
+        let vibe_dir = project_dir.join(".vibe");
+        if vibe_dir.is_dir() {
+            fs::remove_dir_all(&vibe_dir)?;
+            println!("Deleted folder: {}", vibe_dir.display());
+        }
+        removed_folders.push(record.folder_path.clone());
+    }
+    vm_registry::delete_vm_records(cache_dir, &removed_folders)?;
+
+    // Ensure current project starts from scratch even if it wasn't in registry yet.
+    if let Some(current_vibe_dir) = current_instance_raw.parent() {
+        if current_vibe_dir.is_dir() {
+            fs::remove_dir_all(current_vibe_dir)?;
+            println!("Deleted folder: {}", current_vibe_dir.display());
+        }
+    }
+
+    if default_raw.exists() {
+        fs::remove_file(default_raw)?;
+        println!("Deleted file: {}", default_raw.display());
+    }
+
     Ok(())
 }
 

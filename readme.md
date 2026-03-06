@@ -105,6 +105,8 @@ If you don't have `cargo`, you need to install Rust:
 
 ```
 vibe [OPTIONS] [disk-image.raw]
+vibe ls
+vibe recreate
 
 Options
 
@@ -120,6 +122,12 @@ Options
   --send <some-command>                                     Type `some-command` followed by newline into the VM.
   --expect <string> [timeout-seconds]                       Wait for `string` to appear in console output before executing next `--script` or `--send`.
                                                             If `string` does not appear within timeout (default 30 seconds), shutdown VM with error.
+
+Commands
+
+  ls                                                        List tracked VMs from ~/.cache/vibe/vm_registry.json and 
+                                                            optionally delete selected entries and .vibe folders.
+  recreate                                                  Delete cached default image and all tracked `.vibe` folders, then exit.
 ```
 
 Invoking vibe without a disk image:
