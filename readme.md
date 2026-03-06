@@ -140,6 +140,20 @@ Invoking vibe without a disk image:
 - shares the `~/.claude` directory with the VM, so you can use Anthropic's [claude](https://claude.com/product/claude-code)
 - shares the `~/.gemini` directory with the VM, so you can use Google's [gemini-cli](https://github.com/google-gemini/gemini-cli)
 
+If a `.aiexclude` file exists in the project root, Vibe applies masks inside the VM at startup:
+
+- Lines starting with `#` and empty lines are ignored.
+- Absolute paths are used as-is.
+- Relative paths are resolved from the `.aiexclude` file directory.
+- Entries containing `/` are path-based (e.g. `server/secretfolder`).
+- Bare entries without `/` are matched recursively (gitignore-style filename matching):
+  - `.env` matches `.env` files in root and subfolders.
+  - `.env*` matches `.env.production`, `.env.local`, etc. in root and subfolders.
+  - `secretfolder` matches folders/files named `secretfolder` in root and subfolders.
+- Recursive matching skips common heavy folders:
+  `.git`, `node_modules`, `target`, `__pycache__`, `.venv`, `venv`, `env`, `.tox`, `.nox`,
+  `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.cache`, `dist`, `build`, `.next`, `.nuxt`, `.svelte-kit`.
+
 The first time you run `vibe`, a Debian Linux image is downloaded to `~/.cache/vibe/`, configured with basic tools like gcc, [mise-en-place](https://mise.jdx.dev/), ripgrep, rust, etc., and saved as `default.raw`.
 On VM boot, if shared Claude versions exist, `/root/.local/bin/claude` is relinked to the latest version in `/root/.local/share/claude/versions`.
 On VM boot, if `/root/.claude-config/claude.json` exists, it is copied to `/root/.claude.json`.

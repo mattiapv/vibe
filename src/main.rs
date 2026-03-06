@@ -45,6 +45,7 @@ const START_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_EXPECT_TIMEOUT: Duration = Duration::from_secs(30);
 const LOGIN_EXPECT_TIMEOUT: Duration = Duration::from_secs(120);
 const PROVISION_SCRIPT: &str = include_str!("provision.sh");
+const AIEXCLUDE_MOUNTS_SCRIPT: &str = include_str!("aiexclude_mounts.sh");
 const VIBE_GITIGNORE: &str = "# created by vibe automatically\n*\n";
 
 #[derive(Clone)]
@@ -297,6 +298,10 @@ Commands
         login_actions.push(Send(
             " if [ -f /root/.gemini/tmp/bin/rg ] && [ -f /usr/bin/rg ]; then mount --bind /usr/bin/rg /root/.gemini/tmp/bin/rg; fi"
                 .to_string()
+        ));
+        login_actions.push(Send(
+            " if [ -x /root/.aiexclude_mounts.sh ] && [ -f .aiexclude ]; then /root/.aiexclude_mounts.sh .aiexclude; fi"
+                .to_string(),
         ));
     }
 
@@ -633,6 +638,23 @@ fn script_command_from_content(
     Ok(command)
 }
 
+fn script_install_command_from_content(
+    label: &str,
+    script: &str,
+    guest_path: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let marker = "VIBE_SCRIPT_EOF";
+    if script.contains(marker) {
+        return Err(
+            format!("Script '{label}' contains marker '{marker}', cannot safely upload").into(),
+        );
+    }
+
+    let command =
+        format!("cat >{guest_path} <<'{marker}'\n{script}\n{marker}\nchmod +x {guest_path}");
+    Ok(command)
+}
+
 fn motd_login_action(directory_shares: &[DirectoryShare]) -> Option<LoginAction> {
     if directory_shares.is_empty() {
         return Some(Send(" clear".into()));
@@ -835,10 +857,18 @@ fn ensure_default_image(
         // resize to 20GiB
         .set_len(20 * 1024 * BYTES_PER_MB)?;
 
+    let install_aiexclude_mounts_command = script_install_command_from_content(
+        "aiexclude_mounts.sh",
+        AIEXCLUDE_MOUNTS_SCRIPT,
+        "/root/.aiexclude_mounts.sh",
+    )?;
     let provision_command = script_command_from_content("provision.sh", PROVISION_SCRIPT)?;
     run_vm(
         default_raw,
-        &[Send(provision_command)],
+        &[
+            Send(install_aiexclude_mounts_command),
+            Send(provision_command),
+        ],
         directory_shares,
         DEFAULT_CPU_COUNT,
         PROVISION_RAM_BYTES,
