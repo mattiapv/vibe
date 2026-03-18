@@ -16,6 +16,7 @@ Host                                           Guest                        Mode
 ---------------------------------------------  ---------------------------  ----------
 /Users/dev/work/my-project                     /root/my-project             read-write
 /Users/dev/.cache/vibe/.guest-mise-cache       /root/.local/share/mise      read-write
+/Users/dev/.cache/vibe/.guest-mise-config      /root/.config/mise           read-write
 /Users/dev/.cache/vibe/.guest-claude-versions  /root/.local/share/claude    read-write
 /Users/dev/.cache/vibe/.guest-claude-config    /root/.claude-config         read-write
 /Users/dev/.m2                                 /root/.m2                    read-write
@@ -134,6 +135,8 @@ Invoking vibe without a disk image:
 
 - shares the current directory with the VM
 - shares package manager cache directories with the VM, so that packages are not re-downloaded
+- shares `~/.cache/vibe/.guest-mise-cache` with the VM at `/root/.local/share/mise`
+- shares `~/.cache/vibe/.guest-mise-config` with the VM at `/root/.config/mise`
 - shares `~/.cache/vibe/.guest-claude-versions` with the VM at `/root/.local/share/claude`
 - shares `~/.cache/vibe/.guest-claude-config` with the VM at `/root/.claude-config`
 - shares the `~/.codex` directory with the VM, so you can use OpenAI's [codex](https://openai.com/codex/)
