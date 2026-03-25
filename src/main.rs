@@ -238,6 +238,7 @@ Commands
         return run_vm_registry_ls(&cache_dir);
     }
     let guest_mise_cache = cache_dir.join(".guest-mise-cache");
+    let guest_mise_config = cache_dir.join(".guest-mise-config");
     let basename_compressed = DEBIAN_COMPRESSED_DISK_URL.rsplit('/').next().unwrap();
     let base_compressed = cache_dir.join(basename_compressed);
     let base_raw = cache_dir.join(format!(
@@ -248,6 +249,7 @@ Commands
     // Prepare system-wide directories
     fs::create_dir_all(&cache_dir)?;
     fs::create_dir_all(&guest_mise_cache)?;
+    fs::create_dir_all(&guest_mise_config)?;
 
     ensure_signed();
 
@@ -263,6 +265,8 @@ Commands
 
     let mise_directory_share =
         DirectoryShare::new(guest_mise_cache, "/root/.local/share/mise".into(), false)?;
+    let mise_config_directory_share =
+        DirectoryShare::new(guest_mise_config, "/root/.config/mise".into(), false)?;
 
     match args.command {
         CliCommand::Provision {
@@ -290,7 +294,10 @@ Commands
                 &image_path(&cache_dir, &image),
                 replace,
                 &scripts,
-                std::slice::from_ref(&mise_directory_share),
+                &[
+                    mise_directory_share.clone(),
+                    mise_config_directory_share.clone(),
+                ],
                 prepare_provision_network_backend,
                 cpu_count,
                 ram_bytes,
@@ -334,7 +341,10 @@ Commands
                         &base_compressed,
                         &template_raw,
                         &home,
-                        std::slice::from_ref(&mise_directory_share),
+                        &[
+                            mise_directory_share.clone(),
+                            mise_config_directory_share.clone(),
+                        ],
                         prepare_provision_network_backend,
                     )?;
                 } else if !template_raw.exists() {
@@ -374,6 +384,7 @@ Commands
                 );
 
                 directory_shares.push(mise_directory_share);
+                directory_shares.push(mise_config_directory_share);
                 // Activate mise if applicable.
                 // This is in addition to the .bashrc, since mise activation must occur after the shared tool cache is mounted.
                 login_actions.push(Send(
