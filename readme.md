@@ -90,6 +90,20 @@ Vibe only does two things:
 
 When you run `vibe` in a project directory, it copies the default template (`~/.cache/vibe/default.raw`) to `.vibe/instance.raw`, boots it up, and attaches your terminal to this VM.
 
+If a `.aiexclude` file exists in the project root, Vibe applies masks inside the VM at startup:
+
+- Lines starting with `#` and empty lines are ignored.
+- Absolute paths are used as-is.
+- Relative paths are resolved from the `.aiexclude` file directory.
+- Entries containing `/` are path-based (e.g. `server/secretfolder`).
+- Bare entries without `/` are matched recursively (gitignore-style filename matching):
+  - `.env` matches `.env` files in root and subfolders.
+  - `.env*` matches `.env.production`, `.env.local`, etc. in root and subfolders.
+  - `secretfolder` matches folders/files named `secretfolder` in root and subfolders.
+- Recursive matching skips common heavy folders:
+  `.git`, `node_modules`, `target`, `__pycache__`, `.venv`, `venv`, `env`, `.tox`, `.nox`,
+  `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.cache`, `dist`, `build`, `.next`, `.nuxt`, `.svelte-kit`.
+
 When you `exit` this shell, the VM is shutdown.
 The disk state persists until you delete it.
 
