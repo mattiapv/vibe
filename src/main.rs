@@ -502,7 +502,7 @@ Commands
                         // Discourage read/write of project dir subfolders within the VM.
                         // Note that this isn't secure, since the VM runs as root and could unmount this.
                         // I couldn't find an alternative way to do this --- the MacOS sandbox doesn't apply to the Apple Virtualization system =(
-                        for subfolder in [".git", INSTANCE_DIR_NAME] {
+                        for subfolder in [INSTANCE_DIR_NAME] {
                             let hidden_host_path = share.host.join(subfolder);
                             if hidden_host_path.exists() {
                                 let hidden_guest_path = share.guest.join(subfolder);
@@ -521,7 +521,7 @@ Commands
                     // Discourage read/write of project dir subfolders within the VM.
                     // Note that this isn't secure, since the VM runs as root and could unmount this.
                     // I couldn't find an alternative way to do this --- the MacOS sandbox doesn't apply to the Apple Virtualization system =(
-                    for subfolder in [".git", INSTANCE_DIR_NAME] {
+                    for subfolder in [INSTANCE_DIR_NAME] {
                         if project_root.join(subfolder).exists() {
                             login_actions.push(Send(format!(r" mount -t tmpfs tmpfs {subfolder}")));
                         }
