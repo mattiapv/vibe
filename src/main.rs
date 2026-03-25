@@ -59,6 +59,7 @@ const INSTANCE_DISK_IMAGE_NAME: &str = "instance.raw";
 const MAIN_INSTANCE_DIR_NAME: &str = "main";
 const MAIN_FOLDERS_FILE_NAME: &str = "mounted-folders.txt";
 include!(concat!(env!("OUT_DIR"), "/provisioning.rs"));
+const AIEXCLUDE_MOUNTS_SCRIPT: &str = include_str!("aiexclude_mounts.sh");
 const VIBE_GITIGNORE: &str = "# created by vibe automatically\n*\n";
 
 #[derive(Clone)]
@@ -563,6 +564,10 @@ Commands
                 login_actions.push(Send(
                     " if [ -f /root/.gemini/tmp/bin/rg ] && [ -f /usr/bin/rg ]; then mount --bind /usr/bin/rg /root/.gemini/tmp/bin/rg; fi"
                         .to_string()
+                ));
+                login_actions.push(Send(
+                    " if [ -x /root/.aiexclude_mounts.sh ] && [ -f .aiexclude ]; then /root/.aiexclude_mounts.sh .aiexclude; fi"
+                        .to_string(),
                 ));
             }
 
@@ -1383,7 +1388,7 @@ fn read_vibe_ssh_public_key(path: &Path) -> Result<String, Box<dyn std::error::E
 }
 
 fn script_command_and_status_marker(id: &str, script: &str) -> (String, String) {
-    let marker = "VIBE_SCRIPT_EOF";
+    let marker = "VIBE_INSTALL_SCRIPT_EOF";
     let guest_dir = "/tmp/vibe-scripts";
     let guest_path = format!("{guest_dir}/{id}.sh");
     let status_marker = format!("VIBE_SCRIPT_STATUS_{id}");
@@ -1424,6 +1429,23 @@ fn assert_valid_image_name(name: &str) {
 fn image_path(cache_dir: &Path, name: &str) -> PathBuf {
     assert_valid_image_name(name);
     cache_dir.join(format!("{name}.raw"))
+}
+
+fn script_install_command_from_content(
+    label: &str,
+    script: &str,
+    guest_path: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let marker = "VIBE_SCRIPT_EOF";
+    if script.contains(marker) {
+        return Err(
+            format!("Script '{label}' contains marker '{marker}', cannot safely upload").into(),
+        );
+    }
+
+    let command =
+        format!("cat >{guest_path} <<'{marker}'\n{script}\n{marker}\nchmod +x {guest_path}");
+    Ok(command)
 }
 
 fn motd_login_action(directory_shares: &[DirectoryShare]) -> Option<LoginAction> {
@@ -1660,11 +1682,20 @@ fn ensure_default_image(
     ensure_base_image(base_raw, base_compressed)?;
 
     // Provision with everything, so folks who don't read README have a "it just works" experience.
-    let default_provisioning_scripts: Vec<_> = BUILTIN_PROVISION_SCRIPTS
+    let mut default_provisioning_scripts: Vec<_> = BUILTIN_PROVISION_SCRIPTS
         .iter()
         .filter(|s| s.name != "base")
         .cloned()
         .collect();
+    default_provisioning_scripts.push(ProvisionScript {
+        name: Cow::Borrowed("aiexclude-mounts"),
+        description: Cow::Borrowed("Install .aiexclude mount helper."),
+        content: Cow::Owned(script_install_command_from_content(
+            "aiexclude_mounts.sh",
+            AIEXCLUDE_MOUNTS_SCRIPT,
+            "/root/.aiexclude_mounts.sh",
+        )?),
+    });
 
     println!("Provisioning default VM with:");
     for s in &default_provisioning_scripts {
