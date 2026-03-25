@@ -88,7 +88,7 @@ cat > .config/mise/config.toml <<MISE
     idiomatic_version_file_enable_tools = ["rust"]
 
     [tools]
-    uv = "0.9.25"
+    uv = "0.10.10"
     node = "24.15.0"
     "npm:@openai/codex" = "latest"
     "npm:@google/gemini-cli" = "latest"

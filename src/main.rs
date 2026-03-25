@@ -201,6 +201,7 @@ Commands
     let prepare_network_backend = || args.network_mode.prepare(&vmnet_helper_path).unwrap();
 
     let guest_mise_cache = cache_dir.join(".guest-mise-cache");
+    let guest_mise_config_cache = cache_dir.join(".guest-mise-config");
     let guest_claude_versions_cache = cache_dir.join(".guest-claude-versions");
     let guest_claude_config_cache = cache_dir.join(".guest-claude-config");
 
@@ -219,11 +220,14 @@ Commands
     // Prepare system-wide directories
     fs::create_dir_all(&cache_dir)?;
     fs::create_dir_all(&guest_mise_cache)?;
+    fs::create_dir_all(&guest_mise_config_cache)?;
     fs::create_dir_all(&guest_claude_versions_cache)?;
     fs::create_dir_all(&guest_claude_config_cache)?;
 
     let mise_directory_share =
         DirectoryShare::new(guest_mise_cache, "/root/.local/share/mise".into(), false)?;
+    let mise_config_directory_share =
+        DirectoryShare::new(guest_mise_config_cache, "/root/.config/mise".into(), false)?;
     let claude_versions_directory_share = DirectoryShare::new(
         guest_claude_versions_cache,
         "/root/.local/share/claude".into(),
@@ -247,6 +251,7 @@ Commands
             &default_raw,
             &[
                 mise_directory_share.clone(),
+                mise_config_directory_share.clone(),
                 claude_versions_directory_share.clone(),
                 claude_config_directory_share.clone(),
             ],
@@ -282,6 +287,7 @@ Commands
         );
 
         directory_shares.push(mise_directory_share);
+        directory_shares.push(mise_config_directory_share);
         directory_shares.push(claude_versions_directory_share);
         directory_shares.push(claude_config_directory_share);
 
