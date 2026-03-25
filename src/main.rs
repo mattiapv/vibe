@@ -35,6 +35,7 @@ use objc2_virtualization::*;
 mod networking;
 use networking::*;
 mod ssh_runtime;
+mod vm_registry;
 const DEBIAN_COMPRESSED_DISK_URL: &str = "https://cloud.debian.org/images/cloud/trixie/20260112-2355/debian-13-nocloud-arm64-20260112-2355.tar.xz";
 const DEBIAN_COMPRESSED_SHA: &str = "6ab9be9e6834adc975268367f2f0235251671184345c34ee13031749fdfbf66fe4c3aafd949a2d98550426090e9ac645e79009c51eb0eefc984c15786570bb38";
 const DEBIAN_COMPRESSED_SIZE_BYTES: u64 = 280901576;
@@ -164,6 +165,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 vibe [OPTIONS] [LOGIN-ACTIONS ...] [path/to/disk.raw]
 vibe provision [PROVISIONING_OPTIONS] [@built-in | path/to/script.sh ...]
 vibe ssh [--forward HOST_PORT:GUEST_PORT ... | --list | --stop ID|all]
+vibe ls
 
 Options:
 
@@ -203,6 +205,8 @@ Commands
   ssh --list                                                List currently running SSH-managed VMs.
   ssh --stop ID                                             Gracefully stop one SSH-managed VM.
   ssh --stop all                                            Gracefully stop all SSH-managed VMs.
+  ls                                                        List tracked VMs from ~/.cache/vibe/vm_registry.json
+                                                            and optionally delete selected entries and .vibe folders.
 
 {}",
                  provisioning_scripts_banner()
@@ -227,6 +231,10 @@ Commands
             SshCommand::Stop(id) => ssh_runtime::stop_command(&cache_dir, id),
             SshCommand::StopAll => ssh_runtime::stop_all_command(&cache_dir),
         };
+    }
+
+    if matches!(&args.command, CliCommand::List) {
+        return run_vm_registry_ls(&cache_dir);
     }
     let guest_mise_cache = cache_dir.join(".guest-mise-cache");
     let basename_compressed = DEBIAN_COMPRESSED_DISK_URL.rsplit('/').next().unwrap();
@@ -288,6 +296,7 @@ Commands
                 &ssh_public_key,
             )
         }
+        CliCommand::List => unreachable!(),
         CliCommand::Run {
             disk,
             image,
@@ -414,6 +423,7 @@ Commands
 
             if let Some(config) = supervisor {
                 let disk_lock = ssh_runtime::acquire_disk_lock(&disk_path)?;
+                vm_registry::record_vm_launch(&cache_dir, &project_root)?;
                 let (control_tx, control_rx) = mpsc::channel();
                 let runtime = ssh_runtime::SupervisorRuntime::start(
                     &cache_dir,
@@ -443,6 +453,8 @@ Commands
                 }
                 result
             } else {
+                let disk_lock = ssh_runtime::acquire_disk_lock(&disk_path)?;
+                vm_registry::record_vm_launch(&cache_dir, &project_root)?;
                 run_vm(
                     &disk_path,
                     log_to_instance.then_some(instance_dir.as_path()),
@@ -454,7 +466,7 @@ Commands
                     VmIoMode::InteractiveConsole,
                     None,
                     None,
-                    DiskLockMode::Acquire,
+                    DiskLockMode::Held(disk_lock),
                     |_| Ok(()),
                 )
                 .map(|_| ())
@@ -480,6 +492,7 @@ struct CliArgs {
 
 enum CliCommand {
     Ssh(SshCommand),
+    List,
     Run {
         disk: Option<PathBuf>,
         image: String,
@@ -834,6 +847,13 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
                     command = Some(parse_provision_command(&mut parser)?);
                     break;
                 }
+                if disk.is_none() && command.is_none() && value == "ls" {
+                    command = Some(CliCommand::List);
+                    continue;
+                }
+                if matches!(command.as_ref(), Some(CliCommand::List)) {
+                    return Err("Disk path cannot be provided with command 'ls'".into());
+                }
                 if disk.is_some() {
                     return Err("Only one disk path may be provided".into());
                 }
@@ -867,6 +887,20 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
         );
     }
 
+    if matches!(command.as_ref(), Some(CliCommand::List))
+        && (image_seen
+            || no_default_mounts
+            || !env_vars.is_empty()
+            || !mounts.is_empty()
+            || !login_actions.is_empty()
+            || !forwards.is_empty()
+            || network_mode != NetworkMode::Nat
+            || cpu_count != DEFAULT_CPU_COUNT
+            || ram_bytes != DEFAULT_RAM_BYTES)
+    {
+        return Err("Command 'ls' cannot be combined with VM boot options".into());
+    }
+
     Ok(CliArgs {
         command: match command {
             Some(command) => command,
@@ -894,6 +928,126 @@ fn env_login_actions(env: &HashMap<String, String>) -> Vec<LoginAction> {
         //leading space to keep env out of bash history; escape single quotes in value
         .map(|(name, value)| Send(format!(" export {name}='{}'", shell_single_quote(value))))
         .collect()
+}
+
+fn run_vm_registry_ls(cache_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    fs::create_dir_all(cache_dir)?;
+    let records = vm_registry::list_vm_records(cache_dir)?;
+
+    if records.is_empty() {
+        println!("No tracked VMs in {}.", cache_dir.display());
+        return Ok(());
+    }
+
+    println!("Tracked VMs:");
+    println!("{:<4} {:<10} Folder", "ID", "Created At");
+    println!("{:-<4} {:-<10} {:-<6}", "", "", "");
+    for (idx, record) in records.iter().enumerate() {
+        println!(
+            "{:<4} {:<10} {}",
+            idx + 1,
+            record.created_at,
+            record.folder_path
+        );
+    }
+
+    println!();
+    println!("Delete entries? Type indexes like '1 3', 'all'/'a', or press Enter to keep all:");
+    print!("> ");
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    let selected = if input.eq_ignore_ascii_case("all") || input.eq_ignore_ascii_case("a") {
+        (0..records.len()).collect::<Vec<_>>()
+    } else {
+        parse_selection_indexes(input, records.len())?
+    };
+
+    let mut deleted_folders = Vec::with_capacity(selected.len());
+    for idx in selected {
+        let record = &records[idx];
+        let project_dir = PathBuf::from(&record.folder_path);
+        let vibe_dir = project_dir.join(".vibe");
+        let instance_raw = vibe_dir.join("instance.raw");
+
+        if !project_dir.exists() {
+            println!(
+                "Project folder missing, skipping filesystem delete: {}",
+                project_dir.display()
+            );
+        } else if !project_dir.is_dir() {
+            return Err(format!(
+                "Refusing to operate on non-directory project path at {}",
+                project_dir.display()
+            )
+            .into());
+        } else if vibe_dir.is_dir() {
+            if instance_raw.is_file() {
+                // Keep the disk lock until deletion finishes so `vibe ls`
+                // cannot remove a VM that is running or starting.
+                let _disk_lock = match ssh_runtime::acquire_disk_lock(&instance_raw) {
+                    Ok(lock) => lock,
+                    Err(error) => {
+                        println!(
+                            "Skipping VM because its disk is in use: {} ({error})",
+                            project_dir.display()
+                        );
+                        continue;
+                    }
+                };
+                fs::remove_dir_all(&vibe_dir)?;
+                println!("Deleted folder: {}", vibe_dir.display());
+            } else {
+                println!(
+                    "Skipping folder delete (instance.raw missing): {}",
+                    vibe_dir.display()
+                );
+            }
+        } else if vibe_dir.exists() {
+            return Err(format!(
+                "Refusing to delete non-directory path at {}",
+                vibe_dir.display()
+            )
+            .into());
+        } else {
+            println!("Folder already missing: {}", vibe_dir.display());
+        }
+        deleted_folders.push(record.folder_path.clone());
+    }
+
+    vm_registry::delete_vm_records(cache_dir, &deleted_folders)?;
+    println!("Deleted {} registry entr(y/ies).", deleted_folders.len());
+    Ok(())
+}
+
+fn parse_selection_indexes(
+    input: &str,
+    max: usize,
+) -> Result<Vec<usize>, Box<dyn std::error::Error>> {
+    let mut indexes = Vec::new();
+    for token in input.split_whitespace() {
+        let idx: usize = token
+            .parse()
+            .map_err(|_| format!("Invalid index '{}'", token))?;
+        if idx == 0 || idx > max {
+            return Err(format!("Index out of range: {}", idx).into());
+        }
+        let zero_based = idx - 1;
+        if !indexes.contains(&zero_based) {
+            indexes.push(zero_based);
+        }
+    }
+
+    if indexes.is_empty() {
+        return Err("No indexes were provided".into());
+    }
+
+    Ok(indexes)
 }
 
 fn shell_single_quote(value: &str) -> String {
@@ -1475,7 +1629,6 @@ enum VmIoMode {
 }
 
 enum DiskLockMode {
-    Acquire,
     Held(ssh_runtime::FileLock),
     Skip,
 }
@@ -1967,7 +2120,6 @@ fn run_vm(
     mut state_changed: impl FnMut(&str) -> Result<(), Box<dyn std::error::Error>>,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let _disk_lock = match disk_lock {
-        DiskLockMode::Acquire => Some(ssh_runtime::acquire_disk_lock(disk_path)?),
         DiskLockMode::Held(lock) => Some(lock),
         DiskLockMode::Skip => None,
     };
