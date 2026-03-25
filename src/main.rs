@@ -58,6 +58,7 @@ const INSTANCE_DISK_IMAGE_NAME: &str = "instance.raw";
 const MAIN_INSTANCE_DIR_NAME: &str = "main";
 const MAIN_FOLDERS_FILE_NAME: &str = "mounted-folders.txt";
 include!(concat!(env!("OUT_DIR"), "/provisioning.rs"));
+const VIBE_GITIGNORE: &str = "# created by vibe automatically\n*\n";
 
 #[derive(Clone)]
 enum LoginAction {
@@ -1659,7 +1660,9 @@ fn ensure_instance_disk(
     }
 
     println!("Creating instance disk from {}...", template_raw.display());
-    std::fs::create_dir_all(instance_raw.parent().unwrap())?;
+    let instance_dir = instance_raw.parent().unwrap();
+    std::fs::create_dir_all(instance_dir)?;
+    fs::write(instance_dir.join(".gitignore"), VIBE_GITIGNORE)?;
     fs::copy(template_raw, instance_raw)?;
     Ok(())
 }
