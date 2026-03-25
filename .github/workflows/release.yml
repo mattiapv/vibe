@@ -16,6 +16,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -36,6 +38,13 @@ jobs:
         run: |
           cd target/release
           zip vibe-macos-arm64.zip vibe
+
+      - name: Upload branch binary
+        if: github.ref != 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vibe-${{ env.BUILD_DATE }}-${{ env.SHA_SHORT }}.zip
+          path: target/release/vibe-macos-arm64.zip
 
       - name: Create sha release
         if: github.ref == 'refs/heads/main'

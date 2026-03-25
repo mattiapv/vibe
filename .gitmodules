@@ -1,0 +1,3 @@
+[submodule "vendor/vmnet-helper"]
+path = vendor/vmnet-helper
+url = https://github.com/lynaghk/vmnet-helper

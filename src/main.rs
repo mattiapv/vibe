@@ -28,6 +28,8 @@ use objc2::{AnyThread, rc::Retained, runtime::ProtocolObject};
 use objc2_foundation::*;
 use objc2_virtualization::*;
 
+mod networking;
+use networking::*;
 const DEBIAN_COMPRESSED_DISK_URL: &str = "https://cloud.debian.org/images/cloud/trixie/20260112-2355/debian-13-nocloud-arm64-20260112-2355.tar.xz";
 const DEBIAN_COMPRESSED_SHA: &str = "6ab9be9e6834adc975268367f2f0235251671184345c34ee13031749fdfbf66fe4c3aafd949a2d98550426090e9ac645e79009c51eb0eefc984c15786570bb38";
 const DEBIAN_COMPRESSED_SIZE_BYTES: u64 = 280901576;
@@ -141,14 +143,17 @@ Options
   --mount host-path:guest-path[:read-only | :read-write]    Mount `host-path` inside VM at `guest-path`.
                                                             Defaults to read-write.
                                                             Errors if host-path does not exist.
-  --cpus <count>                                            Number of virtual CPUs (default {DEFAULT_CPU_COUNT}).
-  --ram <megabytes>                                         RAM size in megabytes (default {DEFAULT_RAM_MB}).
+  --network [nat | vznat | <bridge interface>]              Guest networking mode (default `nat`).
+                                                            Providing an interface (e.g., `en0`) exposes the VM on that interface.
+                                                            This is just like plugging it in, so it'll get its own IP address, be able to accept incoming connections, etc.
+
+  --cpus <count>                                            Number of virtual CPUs (default 2).
+  --ram <megabytes>                                         RAM size in megabytes (default 2048).
   --script <path/to/script.sh>                              Run script in VM.
   --send <some-command>                                     Type `some-command` followed by newline into the VM.
   --expect <string> [timeout-seconds]                       Wait for `string` to appear in console output before executing next `--script` or `--send`.
                                                             If `string` does not appear within timeout (default 30 seconds), shutdown VM with error.
-"
-        );
+");
         std::process::exit(0);
     }
 
@@ -166,6 +171,10 @@ Options
         .map(PathBuf::from)
         .unwrap_or_else(|_| home.join(".cache"));
     let cache_dir = cache_home.join("vibe");
+
+    let vmnet_helper_path = cache_dir.join("vmnet-helper");
+    let prepare_network_backend = || args.network_mode.prepare(&vmnet_helper_path).unwrap();
+
     let guest_mise_cache = cache_dir.join(".guest-mise-cache");
 
     let instance_dir = project_root.join(".vibe");
@@ -198,6 +207,7 @@ Options
             &base_compressed,
             &default_raw,
             std::slice::from_ref(&mise_directory_share),
+            prepare_network_backend,
         )?;
         ensure_instance_disk(&instance_raw, &default_raw)?;
 
@@ -272,6 +282,7 @@ Options
         &disk_path,
         &login_actions,
         &directory_shares[..],
+        prepare_network_backend,
         args.cpu_count,
         args.ram_bytes,
     )
@@ -284,6 +295,7 @@ struct CliArgs {
     no_default_mounts: bool,
     mounts: Vec<String>,
     login_actions: Vec<LoginAction>,
+    network_mode: NetworkMode,
     cpu_count: usize,
     ram_bytes: u64,
 }
@@ -302,6 +314,7 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut no_default_mounts = false;
     let mut mounts = Vec::new();
     let mut login_actions = Vec::new();
+    let mut network_mode = NetworkMode::VmnetNat;
     let mut script_index = 0;
     let mut cpu_count = DEFAULT_CPU_COUNT;
     let mut ram_bytes = DEFAULT_RAM_BYTES;
@@ -327,6 +340,10 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
             }
             Long("mount") => {
                 mounts.push(os_to_string(parser.value()?, "--mount")?);
+            }
+            Long("network") => {
+                let value = os_to_string(parser.value()?, "--network")?;
+                network_mode = NetworkMode::parse(&value);
             }
             Long("script") => {
                 login_actions.push(Script {
@@ -363,6 +380,7 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
         no_default_mounts,
         mounts,
         login_actions,
+        network_mode,
         cpu_count,
         ram_bytes,
     })
@@ -582,6 +600,7 @@ fn ensure_default_image(
     base_compressed: &Path,
     default_raw: &Path,
     directory_shares: &[DirectoryShare],
+    prepare_network_backend: impl Fn() -> PreparedNetworkBackend,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if default_raw.exists() {
         return Ok(());
@@ -603,6 +622,7 @@ fn ensure_default_image(
         default_raw,
         &[Send(provision_command)],
         directory_shares,
+        prepare_network_backend,
         DEFAULT_CPU_COUNT,
         DEFAULT_RAM_BYTES,
     )?;
@@ -829,6 +849,7 @@ impl IoContext {
 fn create_vm_configuration(
     disk_path: &Path,
     directory_shares: &[DirectoryShare],
+    network_backend: &mut PreparedNetworkBackend,
     vm_reads_from_fd: OwnedFd,
     vm_writes_to_fd: OwnedFd,
     resize_reads_from_fd: OwnedFd,
@@ -851,7 +872,26 @@ fn create_vm_configuration(
 
         config.setNetworkDevices(&NSArray::from_retained_slice(&[{
             let network_device = VZVirtioNetworkDeviceConfiguration::new();
-            network_device.setAttachment(Some(&VZNATNetworkDeviceAttachment::new()));
+            match network_backend {
+                PreparedNetworkBackend::VzNat => {
+                    network_device.setAttachment(Some(&VZNATNetworkDeviceAttachment::new()));
+                }
+                PreparedNetworkBackend::VmnetHelper { vm_socket_fd, .. } => {
+                    let network_fd = vm_socket_fd
+                        .take()
+                        .ok_or_else(|| io::Error::other("vmnet-helper socket already consumed"))?;
+                    let file_handle = NSFileHandle::initWithFileDescriptor_closeOnDealloc(
+                        NSFileHandle::alloc(),
+                        network_fd.into_raw_fd(),
+                        true,
+                    );
+                    let attachment = VZFileHandleNetworkDeviceAttachment::initWithFileHandle(
+                        VZFileHandleNetworkDeviceAttachment::alloc(),
+                        &file_handle,
+                    );
+                    network_device.setAttachment(Some(&attachment));
+                }
+            }
             Retained::into_super(network_device)
         }]));
 
@@ -1038,16 +1078,18 @@ fn run_vm(
     disk_path: &Path,
     login_actions: &[LoginAction],
     directory_shares: &[DirectoryShare],
+    prepare_network_backend: impl Fn() -> PreparedNetworkBackend,
     cpu_count: usize,
     ram_bytes: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (vm_reads_from, we_write_to) = create_pipe();
     let (we_read_from, vm_writes_to) = create_pipe();
     let (resize_reads_from, we_write_resize_to) = create_pipe();
-
+    let mut prepared_network_backend = prepare_network_backend();
     let config = create_vm_configuration(
         disk_path,
         directory_shares,
+        &mut prepared_network_backend,
         vm_reads_from,
         vm_writes_to,
         resize_reads_from,
