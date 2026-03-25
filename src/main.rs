@@ -41,6 +41,8 @@ const BYTES_PER_MB: u64 = 1024 * 1024;
 const DEFAULT_CPU_COUNT: usize = 2;
 const DEFAULT_RAM_MB: u64 = 2048;
 const DEFAULT_RAM_BYTES: u64 = DEFAULT_RAM_MB * BYTES_PER_MB;
+const PROVISION_RAM_MB: u64 = 4096;
+const PROVISION_RAM_BYTES: u64 = PROVISION_RAM_MB * BYTES_PER_MB;
 const START_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_EXPECT_TIMEOUT: Duration = Duration::from_secs(30);
 const LOGIN_EXPECT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -189,6 +191,9 @@ Commands
     let prepare_network_backend = || args.network_mode.prepare(&vmnet_helper_path).unwrap();
 
     let guest_mise_cache = cache_dir.join(".guest-mise-cache");
+    let claude_config_cache = cache_dir.join("claude-config");
+    let host_claude_json = home.join(".claude.json");
+    let cached_claude_json = claude_config_cache.join("claude.json");
 
     let instance_dir = project_root.join(".vibe");
 
@@ -205,9 +210,17 @@ Commands
     // Prepare system-wide directories
     fs::create_dir_all(&cache_dir)?;
     fs::create_dir_all(&guest_mise_cache)?;
+    fs::create_dir_all(&claude_config_cache)?;
+
+    // Refresh claude-config from ~/.claude.json on each boot, if present.
+    if host_claude_json.exists() {
+        fs::copy(&host_claude_json, &cached_claude_json)?;
+    }
 
     let mise_directory_share =
         DirectoryShare::new(guest_mise_cache, "/root/.local/share/mise".into(), false)?;
+    let claude_config_directory_share =
+        DirectoryShare::new(claude_config_cache, "/root/.claude-config".into(), false)?;
 
     let disk_path = if let Some(path) = args.disk {
         if !path.exists() {
@@ -252,6 +265,7 @@ Commands
         );
 
         directory_shares.push(mise_directory_share);
+        directory_shares.push(claude_config_directory_share);
 
         // Add default shares, if they exist
         for share in [
@@ -771,7 +785,7 @@ fn ensure_default_image(
         directory_shares,
         prepare_network_backend,
         DEFAULT_CPU_COUNT,
-        DEFAULT_RAM_BYTES,
+        PROVISION_RAM_BYTES,
     )?;
 
     Ok(())
@@ -1337,6 +1351,16 @@ fn run_vm(
             let guest = share.guest.to_string_lossy();
             all_login_actions.push(Send(format!(" mkdir -p {}", guest)));
             all_login_actions.push(Send(format!(" mount --bind {} {}", staging, guest)));
+        }
+
+        let has_claude_config_share = directory_shares
+            .iter()
+            .any(|share| share.guest == PathBuf::from("/root/.claude-config"));
+        if has_claude_config_share {
+            all_login_actions.push(Send(
+                " if [ -f /root/.claude-config/claude.json ]; then cp /root/.claude-config/claude.json /root/.claude.json; fi"
+                    .to_string(),
+            ));
         }
     }
 
