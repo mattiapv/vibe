@@ -58,12 +58,21 @@ EOF
 # Install Rust
 curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --component "rustfmt,clippy"
 
-
 # Install Mise
 curl https://mise.run | sh
 echo 'eval "$(~/.local/bin/mise activate bash)"' >> .bashrc
 
 # Install Claude Code
+cat > .claude-config/.claude.json <<CLAUDE
+{
+    "firstStartTime": "2026-01-01T00:00:00.000Z"
+}
+CLAUDE
+
+ln -s .claude-config/.claude.json .claude.json
+
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> .bashrc
+
 curl -fsSL https://claude.ai/install.sh | bash
 
 export PATH="$HOME/.local/bin:$PATH"
@@ -80,7 +89,7 @@ cat > .config/mise/config.toml <<MISE
 
     [tools]
     uv = "0.9.25"
-    node = "24.13.0"
+    node = "24.15.0"
     "npm:@openai/codex" = "latest"
     "npm:@google/gemini-cli" = "latest"
     "npm:@earendil-works/pi-coding-agent" = "latest"

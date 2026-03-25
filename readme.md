@@ -12,24 +12,23 @@ $ vibe
   ░▒▓█▓▓█▓▒░ ░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░
    ░▒▓██▓▒░  ░▒▓█▓▒░▒▓███████▓▒░░▒▓████████▓▒░
 
-Host                                      Guest                    Mode
-----------------------------------------  -----------------------  ----------
-/Users/dev/work/my-project                /root/my-project         read-write
-/Users/dev/.cache/vibe/.guest-mise-cache  /root/.local/share/mise  read-write
-/Users/dev/.cache/vibe/.guest-claude-versions  /root/.local/share/claude  read-write
-/Users/dev/.cache/vibe/claude-config      /root/.claude-config     read-write
-/Users/dev/.m2                            /root/.m2                read-write
-/Users/dev/.cargo/registry                /root/.cargo/registry    read-write
-/Users/dev/.codex                         /root/.codex             read-write
-/Users/dev/.claude                        /root/.claude            read-write
-/Users/dev/.gemini                        /root/.gemini            read-write
-/Users/dev/.pi                            /root/.pi                read-write
+Host                                           Guest                        Mode
+---------------------------------------------  ---------------------------  ----------
+/Users/dev/work/my-project                     /root/my-project             read-write
+/Users/dev/.cache/vibe/.guest-mise-cache       /root/.local/share/mise      read-write
+/Users/dev/.cache/vibe/.guest-claude-versions  /root/.local/share/claude    read-write
+/Users/dev/.cache/vibe/.guest-claude-config    /root/.claude-config         read-write
+/Users/dev/.m2                                 /root/.m2                    read-write
+/Users/dev/.cargo/registry                     /root/.cargo/registry        read-write
+/Users/dev/.codex                              /root/.codex                 read-write
+/Users/dev/.claude                             /root/.claude                read-write
+/Users/dev/.gemini                             /root/.gemini                read-write
+/Users/dev/.pi                                 /root/.pi                    read-write
 
 root@vibe:~/my-project#
 ```
 
 On my M1 MacBook Air it takes ~10 seconds to boot.
-
 
 Dependencies:
 
@@ -37,13 +36,12 @@ Dependencies:
 - A network connection is required on the first run to download and configure the Debian Linux base image.
 - That's it!
 
-
 ## Why use Vibe?
 
 - LLM agents are more fun to use with `--yolo`, since they're not always interrupting you to approve their commands.
-- Sandboxing the agent in a VM lets it install/remove whatever tools its lil' transformer heart desires, *without* wrecking your actual machine.
+- Sandboxing the agent in a VM lets it install/remove whatever tools its lil' transformer heart desires, _without_ wrecking your actual machine.
 - You control what the agent (and thus the upstream LLM provider) can actually see, by controlling exactly what's shared into the VM sandbox.
-  (This project was inspired by me running `codex` *without* `--yolo` and seeing it reading files outside of the directory I started it in --- not cool, bro.)
+  (This project was inspired by me running `codex` _without_ `--yolo` and seeing it reading files outside of the directory I started it in --- not cool, bro.)
 
 I'm using virtual machines rather than containers because:
 
@@ -57,7 +55,6 @@ Finally, as a matter of taste and style:
 - The entire implementation is ~1500 lines of Rust.
 - The only Rust dependencies are the [Objc2](https://github.com/madsmtm/objc2) interop crates and the [lexopt](https://github.com/blyxxyz/lexopt) argument parser.
 - There are no emoji anywhere in this repository.
-
 
 ## Install
 
@@ -96,7 +93,6 @@ You can also install via cargo:
 
     cargo install --locked --git https://github.com/lynaghk/vibe.git
 
-
 ## Using Vibe
 
 ```
@@ -127,14 +123,13 @@ Invoking vibe without a disk image:
 - shares the current directory with the VM
 - shares package manager cache directories with the VM, so that packages are not re-downloaded
 - shares `~/.cache/vibe/.guest-claude-versions` with the VM at `/root/.local/share/claude`
-- shares `~/.cache/vibe/claude-config` with the VM at `/root/.claude-config`
+- shares `~/.cache/vibe/.guest-claude-config` with the VM at `/root/.claude-config`
 - shares the `~/.codex` directory with the VM, so you can use OpenAI's [codex](https://openai.com/codex/)
 - shares the `~/.claude` directory with the VM, so you can use Anthropic's [claude](https://claude.com/product/claude-code)
 - shares the `~/.gemini` directory with the VM, so you can use Google's [gemini-cli](https://github.com/google-gemini/gemini-cli)
 - shares the `~/.pi` directory with the VM, so you can use the [Pi agent harness](https://pi.dev/)
 
 The first time you run `vibe`, a Debian Linux image is downloaded to `~/.cache/vibe/`, configured with basic tools like gcc, [mise-en-place](https://mise.jdx.dev/), ripgrep, rust, etc., and saved as `default.raw`.
-On each VM boot, if `~/.claude.json` exists on the host, it is copied to `~/.cache/vibe/claude-config/claude.json`.
 On VM boot, if shared Claude versions exist, `/root/.local/bin/claude` is relinked to the latest version in `/root/.local/share/claude/versions`.
 On VM boot, if `/root/.claude-config/claude.json` exists, it is copied to `/root/.claude.json`.
 (See [provision.sh](/src/provision.sh) for details.)
@@ -150,11 +145,10 @@ There is no centralized registry of VMs --- if you want to delete a VM, just del
 - Apple's [VZNATNetworkDeviceAttachment](https://developer.apple.com/documentation/virtualization/vznatnetworkdeviceattachment) loses packets and VMs get wrecked whenever host networking changes (e.g., switching between wifi/ethernet/VPN) and [VZBridgedNetworkDeviceAttachment](https://developer.apple.com/documentation/virtualization/vzbridgednetworkdeviceattachment) requires kowtowing to acquire the restricted [com.apple.vm.networking](https://developer.apple.com/documentation/BundleResources/Entitlements/com.apple.vm.networking) entitlement.
   To achieve reliable networking, Vibe bundles the [vmnet-helper](https://github.com/lynaghk/vmnet-helper) and automatically runs it for your VMs.
   On MacOS < 26, this requires some sudoers magic --- if necessary, Vibe will give you the appropriate incantations to run.
-  
 - The default VM disk is 20 GiB, but only uses about 2.5 GiB.
   Since Apple Filesystem is copy-on-write and doesn't count zeros, disk space is only used when you actually write new blocks.
   You can use `du -h` to see how much space is actually consumed:
-      
+
       $ ls -lah .vibe/instance.raw
       -rw-r--r--  1 dev  staff    20G Feb 11 21:57 .vibe/instance.raw
 
@@ -167,7 +161,7 @@ There is no centralized registry of VMs --- if you want to delete a VM, just del
 
 - Debian "nocloud" is used as a base image because it boots directly to a root prompt.
   The other images use [cloudinit](https://cloudinit.readthedocs.io/en/latest/), which I found much more complex:
-  - Network requests are made during the boot process, and if you're offline they take several *minutes* to timeout before the login prompt is reached (thanks, `systemd-networkd-wait-online.service`).
+  - Network requests are made during the boot process, and if you're offline they take several _minutes_ to timeout before the login prompt is reached (thanks, `systemd-networkd-wait-online.service`).
   - Subsequent boots are much slower (at least, I couldn't easily figure out how to remove the associated cloud init machinery).
 
 - Claude Code requires both your `~/.claude` folder (shared in the VM by default) and also the `~/.claude.json` file for auth credentials and session history.
@@ -180,37 +174,38 @@ There is no centralized registry of VMs --- if you want to delete a VM, just del
         vibe --send "ln -fs ~/.claude/dot_claude_dot_json_should_have_been_here.json ~/.claude.json" \
              --send "IS_SANDBOX=1 claude --allow-dangerously-skip-permissions --dangerously-skip-permissions"
 
+- Claude Code requires at least 4 GB of RAM to update. Use vibe --ram 4096 when updating.
+
 ## Alternatives
 
 Here's what I tried before writing this solution:
 
 - [Sandboxtron](https://github.com/lynaghk/sandboxtron/) - My own little wrapper around Mac's `sandbox-exec`.
-Turns out both Claude Code and Codex rely on this as well, and MacOS doesn't allow creating a sandbox from within a sandbox.
-I considered writing my own sandboxing rules and running the agents `--yolo`, but didn't like the risk of configuration typos and/or Mac sandbox escapes (there are a lot --- I'm not an expert, but from [this HN discussion](https://news.ycombinator.com/item?id=42084588) I figured virtualization would be safer).
+  Turns out both Claude Code and Codex rely on this as well, and MacOS doesn't allow creating a sandbox from within a sandbox.
+  I considered writing my own sandboxing rules and running the agents `--yolo`, but didn't like the risk of configuration typos and/or Mac sandbox escapes (there are a lot --- I'm not an expert, but from [this HN discussion](https://news.ycombinator.com/item?id=42084588) I figured virtualization would be safer).
 
 - [Lima](https://github.com/lima-vm/lima/), quick Linux VMs on Mac. I wanted to like this, ran into too many issues in first 30 minutes to trust it:
   - The recommended Debian image took 8 seconds to get to a login prompt, even after the VM was already running.
-  - The CLI flags *mutate hidden state*. E.g., If you `limactl start --mount foo` and then later `limactl start --mount bar`, both `foo` and `bar` will be mounted.
+  - The CLI flags _mutate hidden state_. E.g., If you `limactl start --mount foo` and then later `limactl start --mount bar`, both `foo` and `bar` will be mounted.
   - Some capabilities are only available via yaml. E.g., the `--mount` CLI flag always mounts at the same path in the guest. If you want to mount at a different path, you have to do that via YAML.
   - There are many layers of inheritance/defaults, so even if you do write YAML, you can't see the full configuration.
 
 - [Vagrant](https://developer.hashicorp.com/vagrant/) - I fondly remember using this back in the early 2010's, but based on this [2025 Reddit discussion](https://www.reddit.com/r/devops/comments/1axws75/vagrant_doesnt_support_mac_m1/) it seemed like running it on an ARM-based Mac was A Project and so I figured it'd be easier to roll my own thing.
 
 - [Tart](https://tart.run/) - I found this via some positive HN comments, but unfortunately wasn't able to run the release binary from their GitHub because it's not signed.
-They apparently hack around that when installing with homebrew, but I don't use homebrew either.
-I tried cloning the repo and compiling myself, but the build failed with lots of language syntax errors despite the repo SHA is the same as one of their releases.
-I assume this is a Swift problem and not Tart's, since this sort of mess happens most times when I try to build Swift. `¯\_(ツ)_/¯`
+  They apparently hack around that when installing with homebrew, but I don't use homebrew either.
+  I tried cloning the repo and compiling myself, but the build failed with lots of language syntax errors despite the repo SHA is the same as one of their releases.
+  I assume this is a Swift problem and not Tart's, since this sort of mess happens most times when I try to build Swift. `¯\_(ツ)_/¯`
 
 - [OrbStack](https://orbstack.dev/) - This looked nice, but seems mostly geared towards container stuff.
-It runs a single VM, and I couldn't figure out how to have this VM run *without* my entire disk mounted inside of it.
-I didn't want to run agents via containers, since containers aren't security boundaries.
+  It runs a single VM, and I couldn't figure out how to have this VM run _without_ my entire disk mounted inside of it.
+  I didn't want to run agents via containers, since containers aren't security boundaries.
 
 - [Apple Container Framework](https://github.com/apple/container) - This looks technically promising, as it runs every container within a lightweight VM.
-Unfortunately it requires MacOS 26 Tahoe, which wrecks [window resizing](https://news.ycombinator.com/item?id=46579864), adds [useless icons everywhere](https://news.ycombinator.com/item?id=46497712), and otherwise seems to be a mess.
-Sorry excellent Apple programmers and hardware designers, I hope your management can reign in the haute couture folks before we all have to switch to Linux for professional computing.
+  Unfortunately it requires MacOS 26 Tahoe, which wrecks [window resizing](https://news.ycombinator.com/item?id=46579864), adds [useless icons everywhere](https://news.ycombinator.com/item?id=46497712), and otherwise seems to be a mess.
+  Sorry excellent Apple programmers and hardware designers, I hope your management can reign in the haute couture folks before we all have to switch to Linux for professional computing.
 
-- [QEMU](https://wiki.qemu.org/) - The first prototype of this app was [a single bash script](https://github.com/lynaghk/vibe/blob/1c82fd3b9fabf93abba2680fc856458e97a105cd/qemu.sh) wrapping `qemu`. This worked swimmingly, except for host/guest directory sharing, which ended up being a show-stopper. This is because QEMU doesn't support [virtiofs](https://virtio-fs.gitlab.io/) on Mac hosts, it only supports "9p", which is way slower ---  e.g., `mise use node@latest` takes > 10 minutes on 9p and 5 seconds on virtiofs.
-
+- [QEMU](https://wiki.qemu.org/) - The first prototype of this app was [a single bash script](https://github.com/lynaghk/vibe/blob/1c82fd3b9fabf93abba2680fc856458e97a105cd/qemu.sh) wrapping `qemu`. This worked swimmingly, except for host/guest directory sharing, which ended up being a show-stopper. This is because QEMU doesn't support [virtiofs](https://virtio-fs.gitlab.io/) on Mac hosts, it only supports "9p", which is way slower --- e.g., `mise use node@latest` takes > 10 minutes on 9p and 5 seconds on virtiofs.
 
 ## Roadmap / Collaboration
 
