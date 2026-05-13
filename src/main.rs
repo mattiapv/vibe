@@ -739,8 +739,9 @@ fn motd_login_action(directory_shares: &[DirectoryShare]) -> Option<LoginAction>
         ));
     }
 
-    let command = format!(" clear && cat <<'VIBE_MOTD'\n{output}\nVIBE_MOTD");
-    Some(Send(command))
+    let _command = format!(" clear && cat <<'VIBE_MOTD'\n{output}\nVIBE_MOTD");
+    // Some(Send(command))
+    Some(Send("clear".to_string()))
 }
 
 #[derive(PartialEq, Eq)]
