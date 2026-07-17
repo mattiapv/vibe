@@ -239,6 +239,7 @@ Commands
     }
     let guest_mise_cache = cache_dir.join(".guest-mise-cache");
     let guest_mise_config = cache_dir.join(".guest-mise-config");
+    let guest_claude_config = cache_dir.join(".guest-claude-config");
     let basename_compressed = DEBIAN_COMPRESSED_DISK_URL.rsplit('/').next().unwrap();
     let base_compressed = cache_dir.join(basename_compressed);
     let base_raw = cache_dir.join(format!(
@@ -250,6 +251,7 @@ Commands
     fs::create_dir_all(&cache_dir)?;
     fs::create_dir_all(&guest_mise_cache)?;
     fs::create_dir_all(&guest_mise_config)?;
+    fs::create_dir_all(&guest_claude_config)?;
 
     ensure_signed();
 
@@ -267,6 +269,8 @@ Commands
         DirectoryShare::new(guest_mise_cache, "/root/.local/share/mise".into(), false)?;
     let mise_config_directory_share =
         DirectoryShare::new(guest_mise_config, "/root/.config/mise".into(), false)?;
+    let claude_config_directory_share =
+        DirectoryShare::new(guest_claude_config, "/root/.claude-config".into(), false)?;
 
     match args.command {
         CliCommand::Provision {
@@ -297,6 +301,7 @@ Commands
                 &[
                     mise_directory_share.clone(),
                     mise_config_directory_share.clone(),
+                    claude_config_directory_share.clone(),
                 ],
                 prepare_provision_network_backend,
                 cpu_count,
@@ -344,6 +349,7 @@ Commands
                         &[
                             mise_directory_share.clone(),
                             mise_config_directory_share.clone(),
+                            claude_config_directory_share.clone(),
                         ],
                         prepare_provision_network_backend,
                     )?;
@@ -385,6 +391,7 @@ Commands
 
                 directory_shares.push(mise_directory_share);
                 directory_shares.push(mise_config_directory_share);
+                directory_shares.push(claude_config_directory_share);
                 // Activate mise if applicable.
                 // This is in addition to the .bashrc, since mise activation must occur after the shared tool cache is mounted.
                 login_actions.push(Send(
