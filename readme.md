@@ -17,6 +17,7 @@ Host                                      Guest                    Mode
 /Users/dev/work/my-project                /root/my-project         read-write
 /Users/dev/.cache/vibe/.guest-mise-cache  /root/.local/share/mise  read-write
 /Users/dev/.cache/vibe/.guest-mise-config /root/.config/mise       read-write
+/Users/dev/.cache/vibe/.guest-claude-config /root/.claude-config   read-write
 /Users/dev/.m2                            /root/.m2                read-write
 /Users/dev/.cargo/registry                /root/.cargo/registry    read-write
 /Users/dev/.codex                         /root/.codex             read-write
@@ -261,15 +262,7 @@ Provisioning creates a new named image by running (built-in) scripts. Options:
   - Network requests are made during the boot process, and if you're offline they take several *minutes* to timeout before the login prompt is reached (thanks, `systemd-networkd-wait-online.service`).
   - Subsequent boots are much slower (at least, I couldn't easily figure out how to remove the associated cloud init machinery).
 
-- Claude Code requires both your `~/.claude` folder (shared in the VM by default) and also the `~/.claude.json` file for auth credentials and session history.
-  VirtioFS only works with folders, so there's not a nice way to "mount" the latter inside the VM.
-  Here's what I recommend:
-  - Run `claude` and login. (You can do this in a VM or on your actual machine if you trust `claude`.)
-  - `mv ~/.claude.json ~/.claude/dot_claude_dot_json_should_have_been_here.json`
-  - make a shell alias/script to launch Vibe as:
-
-        vibe --send "ln -fs ~/.claude/dot_claude_dot_json_should_have_been_here.json ~/.claude.json" \
-             --send "IS_SANDBOX=1 claude --allow-dangerously-skip-permissions --dangerously-skip-permissions"
+- Claude Code keeps credentials and session state in `.claude.json`. Vibe stores this file in its persistent guest share at `~/.cache/vibe/.guest-claude-config`, so logging in from the VM preserves it without reading or overwriting the host's `~/.claude.json`.
 
 
 ## Alternatives
