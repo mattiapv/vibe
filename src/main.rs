@@ -173,6 +173,7 @@ Options:
   --network <nat|vznat>                                     Guest networking mode (default `nat`).
                                                             `nat` uses Vibe's bundled user-mode network stack.
                                                             `vznat` uses Apple's VZNATNetworkDeviceAttachment.
+  --forward HOST_PORT:GUEST_PORT                             Forward a loopback-only TCP host port to the VM (repeatable; requires `--network nat`).
   --cpus COUNT                                              Number of virtual CPUs (default 2).
   --ram MEGABYTES                                           RAM size in megabytes (default 2048).
 
@@ -217,8 +218,11 @@ Provisioning creates a new named image by running (built-in) scripts. Options:
     let usernet_helper_path = cache_dir.join("vibe-usernet");
     let prepare_network_backend = |log_dir: Option<&Path>| {
         args.network_mode
-            .prepare(&usernet_helper_path, log_dir)
-            .unwrap()
+            .prepare(&usernet_helper_path, &args.forwards, log_dir)
+    };
+    let prepare_provision_network_backend = |log_dir: Option<&Path>| {
+        args.network_mode
+            .prepare(&usernet_helper_path, &[], log_dir)
     };
 
     let mise_directory_share =
@@ -250,7 +254,7 @@ Provisioning creates a new named image by running (built-in) scripts. Options:
                 replace,
                 &scripts,
                 std::slice::from_ref(&mise_directory_share),
-                prepare_network_backend,
+                prepare_provision_network_backend,
                 cpu_count,
                 ram_bytes,
             )
@@ -284,7 +288,7 @@ Provisioning creates a new named image by running (built-in) scripts. Options:
                         &base_compressed,
                         &template_raw,
                         std::slice::from_ref(&mise_directory_share),
-                        prepare_network_backend,
+                        prepare_provision_network_backend,
                     )?;
                 } else if !template_raw.exists() {
                     return Err(format!(
@@ -394,6 +398,7 @@ struct CliArgs {
     mounts: Vec<String>,
     login_actions: Vec<LoginAction>,
     network_mode: NetworkMode,
+    forwards: Vec<PortForward>,
     cpu_count: usize,
     ram_bytes: u64,
 }
@@ -521,6 +526,7 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut mounts = Vec::new();
     let mut login_actions = Vec::new();
     let mut network_mode = NetworkMode::Nat;
+    let mut forwards = Vec::new();
     let mut cpu_count = DEFAULT_CPU_COUNT;
     let mut ram_bytes = DEFAULT_RAM_BYTES;
 
@@ -561,6 +567,19 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 let value = os_to_string(parser.value()?, "--network")?;
                 network_mode = NetworkMode::parse(&value)?;
             }
+            Long("forward") => {
+                let value = os_to_string(parser.value()?, "--forward")?;
+                let forward = PortForward::parse(&value)?;
+                if forwards
+                    .iter()
+                    .any(|existing: &PortForward| existing.host_port == forward.host_port)
+                {
+                    return Err(
+                        format!("Duplicate --forward host port: {}", forward.host_port).into(),
+                    );
+                }
+                forwards.push(forward);
+            }
             Long("script") => {
                 let path = os_to_string(parser.value()?, "--script")?;
                 let content = fs::read_to_string(&path)
@@ -596,6 +615,16 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
         }
     }
 
+    if !forwards.is_empty() && network_mode == NetworkMode::VzNat {
+        return Err("--forward requires --network nat".into());
+    }
+
+    if !forwards.is_empty() && matches!(command.as_ref(), Some(CliCommand::Provision { .. })) {
+        return Err(
+            "--forward is only available when running a VM, not provisioning an image".into(),
+        );
+    }
+
     Ok(CliArgs {
         command: match command {
             Some(command) => command,
@@ -608,6 +637,7 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
         mounts,
         login_actions,
         network_mode,
+        forwards,
         cpu_count,
         ram_bytes,
     })
@@ -882,7 +912,9 @@ fn ensure_default_image(
     base_compressed: &Path,
     default_raw: &Path,
     directory_shares: &[DirectoryShare],
-    prepare_network_backend: impl Fn(Option<&Path>) -> PreparedNetworkBackend,
+    prepare_network_backend: impl Fn(
+        Option<&Path>,
+    ) -> Result<PreparedNetworkBackend, Box<dyn std::error::Error>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if default_raw.exists() {
         return Ok(());
@@ -922,7 +954,9 @@ fn provision_image(
     replace: bool,
     extra_scripts: &[ProvisionScript],
     directory_shares: &[DirectoryShare],
-    prepare_network_backend: impl Fn(Option<&Path>) -> PreparedNetworkBackend,
+    prepare_network_backend: impl Fn(
+        Option<&Path>,
+    ) -> Result<PreparedNetworkBackend, Box<dyn std::error::Error>>,
     cpu_count: usize,
     ram_bytes: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1507,14 +1541,16 @@ fn run_vm(
     network_log_dir: Option<&Path>,
     login_actions: &[LoginAction],
     directory_shares: &[DirectoryShare],
-    prepare_network_backend: impl Fn(Option<&Path>) -> PreparedNetworkBackend,
+    prepare_network_backend: impl Fn(
+        Option<&Path>,
+    ) -> Result<PreparedNetworkBackend, Box<dyn std::error::Error>>,
     cpu_count: usize,
     ram_bytes: u64,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let (vm_reads_from, we_write_to) = create_pipe();
     let (we_read_from, vm_writes_to) = create_pipe();
     let (resize_reads_from, we_write_resize_to) = create_pipe();
-    let mut prepared_network_backend = prepare_network_backend(network_log_dir);
+    let mut prepared_network_backend = prepare_network_backend(network_log_dir)?;
     let config = create_vm_configuration(
         disk_path,
         directory_shares,

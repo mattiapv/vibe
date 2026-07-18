@@ -129,6 +129,7 @@ Options:
   --network <nat|vznat>                                     Guest networking mode (default `nat`).
                                                             `nat` uses Vibe's bundled user-mode network stack.
                                                             `vznat` uses Apple's VZNATNetworkDeviceAttachment.
+  --forward HOST_PORT:GUEST_PORT                             Forward a loopback-only TCP host port to the VM (repeatable; requires `--network nat`).
   --cpus COUNT                                              Number of virtual CPUs (default 2).
   --ram MEGABYTES                                           RAM size in megabytes (default 2048).
 
@@ -151,7 +152,7 @@ Provisioning creates a new named image by running (built-in) scripts. Options:
 ## Other notes
 
 - Vibe VMs can reach the host at `192.168.5.2`.
-  The host cannot reach the Vibe VMs, nor can VMs reach each other.
+  VMs cannot reach each other. The host can reach an explicitly forwarded TCP port, such as `vibe --forward 8080:80`, at `127.0.0.1:8080`.
   DNS is handled by the host resolver, so VMs get VPN and split-DNS compatibility.
 
 - This networking is based on a bundled gVisor/Lima-style user-mode network helper process, `vibe-usernet`, which is spawned automatically when you run `vibe`.

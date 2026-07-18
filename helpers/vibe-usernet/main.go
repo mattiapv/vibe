@@ -43,6 +43,8 @@ func run() error {
 	fd := flag.Int("fd", defaultFD, "connected VZ datagram file descriptor")
 	parentLivenessFD := flag.Int("parent-liveness-fd", defaultParentLivenessFD, "parent liveness file descriptor")
 	guestMAC := flag.String("mac", "", "guest MAC address")
+	var forwards forwardFlags
+	flag.Var(&forwards, "forward", "forward loopback HOST_PORT to GUEST_PORT")
 	flag.Parse()
 
 	if flag.NArg() != 0 {
@@ -50,6 +52,14 @@ func run() error {
 	}
 	if _, err := net.ParseMAC(*guestMAC); err != nil {
 		return fmt.Errorf("invalid --mac: %w", err)
+	}
+	forwardMap := make(map[string]string, len(forwards))
+	for _, forward := range forwards {
+		local := net.JoinHostPort("127.0.0.1", forward.hostPort)
+		if _, exists := forwardMap[local]; exists {
+			return fmt.Errorf("duplicate --forward host port: %s", forward.hostPort)
+		}
+		forwardMap[local] = net.JoinHostPort(guestIP, forward.guestPort)
 	}
 
 	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -77,7 +87,7 @@ func run() error {
 			gatewayIP: gatewayMAC,
 			guestIP:   *guestMAC,
 		},
-		Forwards:          map[string]string{},
+		Forwards:          forwardMap,
 		DNS:               []types.Zone{},
 		DNSSearchDomains:  searchDomains(),
 		NAT:               map[string]string{gatewayIP: "127.0.0.1"},
@@ -103,6 +113,36 @@ func run() error {
 		}
 		return err
 	}
+}
+
+type portForward struct {
+	hostPort  string
+	guestPort string
+}
+
+type forwardFlags []portForward
+
+func (forwards *forwardFlags) String() string {
+	values := make([]string, 0, len(*forwards))
+	for _, forward := range *forwards {
+		values = append(values, forward.hostPort+":"+forward.guestPort)
+	}
+	return strings.Join(values, ",")
+}
+
+func (forwards *forwardFlags) Set(value string) error {
+	hostPort, guestPort, ok := strings.Cut(value, ":")
+	if !ok || hostPort == "" || guestPort == "" || strings.Contains(guestPort, ":") {
+		return fmt.Errorf("--forward must have the form HOST_PORT:GUEST_PORT")
+	}
+	if _, err := net.LookupPort("tcp", hostPort); err != nil {
+		return fmt.Errorf("invalid --forward host port %q: %w", hostPort, err)
+	}
+	if _, err := net.LookupPort("tcp", guestPort); err != nil {
+		return fmt.Errorf("invalid --forward guest port %q: %w", guestPort, err)
+	}
+	*forwards = append(*forwards, portForward{hostPort: hostPort, guestPort: guestPort})
+	return nil
 }
 
 func fileConn(fd int, name string) (net.Conn, error) {

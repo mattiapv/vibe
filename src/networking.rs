@@ -28,6 +28,38 @@ pub enum NetworkMode {
     VzNat,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PortForward {
+    pub host_port: u16,
+    pub guest_port: u16,
+}
+
+impl PortForward {
+    pub fn parse(value: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let (host_port, guest_port) = value
+            .split_once(':')
+            .ok_or_else(|| "--forward must have the form HOST_PORT:GUEST_PORT")?;
+        if host_port.is_empty() || guest_port.is_empty() || guest_port.contains(':') {
+            return Err("--forward must have the form HOST_PORT:GUEST_PORT".into());
+        }
+
+        let host_port: u16 = host_port
+            .parse()
+            .map_err(|_| "--forward host port must be an integer from 1 through 65535")?;
+        let guest_port: u16 = guest_port
+            .parse()
+            .map_err(|_| "--forward guest port must be an integer from 1 through 65535")?;
+        if host_port == 0 || guest_port == 0 {
+            return Err("--forward ports must be from 1 through 65535".into());
+        }
+
+        Ok(Self {
+            host_port,
+            guest_port,
+        })
+    }
+}
+
 pub enum PreparedNetworkBackend {
     VzNat,
     Usernet {
@@ -51,10 +83,17 @@ impl NetworkMode {
     pub fn prepare(
         &self,
         usernet_helper_path: &Path,
+        forwards: &[PortForward],
         log_path: Option<&Path>,
     ) -> Result<PreparedNetworkBackend, Box<dyn std::error::Error>> {
         match self {
-            NetworkMode::VzNat => Ok(PreparedNetworkBackend::VzNat),
+            NetworkMode::VzNat => {
+                if forwards.is_empty() {
+                    Ok(PreparedNetworkBackend::VzNat)
+                } else {
+                    Err("--forward requires --network nat".into())
+                }
+            }
             NetworkMode::Nat => {
                 ensure_usernet_helper_extracted(usernet_helper_path);
 
@@ -69,6 +108,12 @@ impl NetworkMode {
                     .stdin(Stdio::null())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped());
+
+                for forward in forwards {
+                    command
+                        .arg("--forward")
+                        .arg(format!("{}:{}", forward.host_port, forward.guest_port));
+                }
 
                 let (vm_socket_fd, helper_socket_fd) = create_datagram_pair();
                 let helper_raw_fd = helper_socket_fd.as_raw_fd();
