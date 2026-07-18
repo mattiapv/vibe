@@ -93,6 +93,32 @@ When you run `vibe` in a project directory, it copies the default template (`~/.
 When you `exit` this shell, the VM is shutdown.
 The disk state persists until you delete it.
 
+For a persistent, reconnectable VM, use SSH mode:
+
+    vibe ssh
+
+This starts the current project's VM in a detached supervisor and connects with
+the host `/usr/bin/ssh` client. Logging out, pressing Ctrl-D, losing the
+connection, or closing the terminal leaves the VM running. Running `vibe ssh`
+again from the same canonical project folder reconnects to that VM. Different
+projects receive separate loopback ports starting at 2222.
+
+List and stop live SSH-managed VMs with:
+
+    vibe ssh --list
+    vibe ssh --stop ID
+
+`vibe ssh --list` reports live processes only. A guest `poweroff` also ends its
+supervisor and removes the live record. Stale live records left by a crash or
+host reboot are cleaned by the next SSH command.
+
+SSH mode uses the fixed host identity `~/.ssh/vibe_ed25519`. The selected image
+must have been provisioned with `@ssh`, and the public key installed by
+`provisioning/ssh.sh` must match that identity. The private key is never copied
+into the guest. Supervisor diagnostics are written to
+`.vibe/vibe-ssh-supervisor.log`; networking diagnostics remain in
+`.vibe/vibe-usernet.log`.
+
 Where does this `default.raw` raw disk image come from?
 
 When you first run `vibe`, a Debian Linux base image is downloaded and [all of the provisioning scripts](/provisioning/) are run against it.
@@ -115,6 +141,7 @@ If you don't want this, you can make your own `.raw` disk images and copy them i
 ```
 vibe [OPTIONS] [LOGIN-ACTIONS ...] [path/to/disk.raw]
 vibe provision [PROVISIONING_OPTIONS] [@built-in | path/to/script.sh ...]
+vibe ssh [--list | --stop ID]
 
 Options:
 
