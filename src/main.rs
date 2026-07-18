@@ -17,6 +17,7 @@ use std::{
     process::{Command, Stdio},
     sync::{
         Arc, Condvar, Mutex,
+        atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, Sender},
     },
     thread,
@@ -32,6 +33,7 @@ use objc2_virtualization::*;
 
 mod networking;
 use networking::*;
+mod ssh_runtime;
 const DEBIAN_COMPRESSED_DISK_URL: &str = "https://cloud.debian.org/images/cloud/trixie/20260112-2355/debian-13-nocloud-arm64-20260112-2355.tar.xz";
 const DEBIAN_COMPRESSED_SHA: &str = "6ab9be9e6834adc975268367f2f0235251671184345c34ee13031749fdfbf66fe4c3aafd949a2d98550426090e9ac645e79009c51eb0eefc984c15786570bb38";
 const DEBIAN_COMPRESSED_SIZE_BYTES: u64 = 280901576;
@@ -159,6 +161,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 vibe [OPTIONS] [LOGIN-ACTIONS ...] [path/to/disk.raw]
 vibe provision [PROVISIONING_OPTIONS] [@built-in | path/to/script.sh ...]
+vibe ssh [--list | --stop ID]
 
 Options:
 
@@ -192,6 +195,12 @@ Provisioning creates a new named image by running (built-in) scripts. Options:
   --cpus COUNT                                              Number of virtual CPUs for the provisioning VM (default 2).
   --ram MEGABYTES                                           RAM size in megabytes for the provisioning VM (default 2048).
 
+Commands
+
+  ssh                                                       Start or reconnect to a persistent VM over SSH.
+  ssh --list                                                List currently running SSH-managed VMs.
+  ssh --stop ID                                             Gracefully stop one SSH-managed VM.
+
 {}",
                  provisioning_scripts_banner()
         );
@@ -201,6 +210,16 @@ Provisioning creates a new named image by running (built-in) scripts. Options:
     let home = env::var("HOME").map(PathBuf::from)?;
     let cache_home = env::var("XDG_CACHE_HOME").map_or_else(|_| home.join(".cache"), PathBuf::from);
     let cache_dir = cache_home.join("vibe");
+    if let CliCommand::Ssh(command) = &args.command {
+        return match command {
+            SshCommand::Connect => {
+                ensure_signed();
+                ssh_runtime::connect_command(&cache_dir, &home, &env::current_dir()?)
+            }
+            SshCommand::List => ssh_runtime::list_command(&cache_dir),
+            SshCommand::Stop(id) => ssh_runtime::stop_command(&cache_dir, id),
+        };
+    }
     let guest_mise_cache = cache_dir.join(".guest-mise-cache");
     let basename_compressed = DEBIAN_COMPRESSED_DISK_URL.rsplit('/').next().unwrap();
     let base_compressed = cache_dir.join(basename_compressed);
@@ -259,8 +278,15 @@ Provisioning creates a new named image by running (built-in) scripts. Options:
                 ram_bytes,
             )
         }
-        CliCommand::Run { disk, image } => {
-            let project_root = env::current_dir()?;
+        CliCommand::Run {
+            disk,
+            image,
+            supervisor,
+        } => {
+            let project_root = match &supervisor {
+                Some(config) => config.project_root.clone(),
+                None => env::current_dir()?.canonicalize()?,
+            };
             let project_name = project_root
                 .file_name()
                 .unwrap()
@@ -306,7 +332,7 @@ Provisioning creates a new named image by running (built-in) scripts. Options:
             let mut directory_shares = Vec::new();
 
             if !args.no_default_mounts {
-                login_actions.push(Send(format!(" cd {project_name}")));
+                login_actions.push(Send(format!(" cd '{}'", shell_single_quote(&project_name))));
 
                 // Discourage read/write of project dir subfolders within the VM.
                 // Note that this isn't secure, since the VM runs as root and could unmount this.
@@ -319,7 +345,7 @@ Provisioning creates a new named image by running (built-in) scripts. Options:
 
                 directory_shares.push(
                     DirectoryShare::new(
-                        project_root,
+                        project_root.clone(),
                         PathBuf::from("/root/").join(project_name),
                         false,
                     )
@@ -375,17 +401,54 @@ Provisioning creates a new named image by running (built-in) scripts. Options:
             // Any user-provided login actions must come after our system ones
             login_actions.extend(args.login_actions);
 
-            run_vm(
-                &disk_path,
-                log_to_instance.then_some(instance_dir.as_path()),
-                &login_actions,
-                &directory_shares[..],
-                prepare_network_backend,
-                args.cpu_count,
-                args.ram_bytes,
-            )
-            .map(|_| ())
+            if let Some(config) = supervisor {
+                let disk_lock = ssh_runtime::acquire_disk_lock(&disk_path)?;
+                let (control_tx, control_rx) = mpsc::channel();
+                let runtime = ssh_runtime::SupervisorRuntime::start(
+                    &cache_dir,
+                    &project_root,
+                    config.host_port,
+                    config.startup_token.clone(),
+                    control_tx,
+                )?;
+                let result = run_vm(
+                    &disk_path,
+                    Some(instance_dir.as_path()),
+                    &login_actions,
+                    &directory_shares,
+                    prepare_network_backend,
+                    args.cpu_count,
+                    args.ram_bytes,
+                    VmIoMode::Headless,
+                    Some(control_rx),
+                    Some(config.startup_token),
+                    Some(disk_lock),
+                    |status| runtime.set_status(status),
+                )
+                .map(|_| ());
+                if result.is_err() {
+                    let _ = runtime.set_status("failed");
+                }
+                result
+            } else {
+                run_vm(
+                    &disk_path,
+                    log_to_instance.then_some(instance_dir.as_path()),
+                    &login_actions,
+                    &directory_shares,
+                    prepare_network_backend,
+                    args.cpu_count,
+                    args.ram_bytes,
+                    VmIoMode::InteractiveConsole,
+                    None,
+                    None,
+                    None,
+                    |_| Ok(()),
+                )
+                .map(|_| ())
+            }
         }
+        CliCommand::Ssh(_) => unreachable!(),
     }
 }
 
@@ -404,9 +467,11 @@ struct CliArgs {
 }
 
 enum CliCommand {
+    Ssh(SshCommand),
     Run {
         disk: Option<PathBuf>,
         image: String,
+        supervisor: Option<SupervisorArgs>,
     },
     Provision {
         base: Option<String>,
@@ -416,6 +481,18 @@ enum CliCommand {
         cpu_count: usize,
         ram_bytes: u64,
     },
+}
+
+enum SshCommand {
+    Connect,
+    List,
+    Stop(String),
+}
+
+struct SupervisorArgs {
+    project_root: PathBuf,
+    host_port: u16,
+    startup_token: String,
 }
 
 fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
@@ -514,6 +591,70 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
         })
     }
 
+    fn parse_ssh_command(
+        parser: &mut lexopt::Parser,
+    ) -> Result<CliCommand, Box<dyn std::error::Error>> {
+        let mut command = SshCommand::Connect;
+        while let Some(arg) = parser.next()? {
+            match arg {
+                Long("list") if matches!(command, SshCommand::Connect) => {
+                    command = SshCommand::List
+                }
+                Long("stop") if matches!(command, SshCommand::Connect) => {
+                    let id = os_to_string(parser.value()?, "--stop")?;
+                    if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit()) {
+                        return Err(
+                            "vibe ssh --stop requires a numeric ID from `vibe ssh --list`".into(),
+                        );
+                    }
+                    command = SshCommand::Stop(id);
+                }
+                Long("list") | Long("stop") => {
+                    return Err("vibe ssh --list and --stop are mutually exclusive".into());
+                }
+                _ => {
+                    return Err(format!(
+                        "vibe ssh does not accept VM boot options: {}",
+                        arg.unexpected()
+                    )
+                    .into());
+                }
+            }
+        }
+        Ok(CliCommand::Ssh(command))
+    }
+
+    fn parse_supervisor_command(
+        parser: &mut lexopt::Parser,
+    ) -> Result<CliCommand, Box<dyn std::error::Error>> {
+        let mut project_root = None;
+        let mut host_port = None;
+        let mut startup_token = None;
+        while let Some(arg) = parser.next()? {
+            match arg {
+                Long("project-root") => project_root = Some(PathBuf::from(parser.value()?)),
+                Long("host-port") => {
+                    host_port = Some(os_to_string(parser.value()?, "--host-port")?.parse::<u16>()?)
+                }
+                Long("startup-token") => {
+                    startup_token = Some(os_to_string(parser.value()?, "--startup-token")?)
+                }
+                _ => return Err(arg.unexpected().into()),
+            }
+        }
+        Ok(CliCommand::Run {
+            disk: None,
+            image: DEFAULT_IMAGE_NAME.into(),
+            supervisor: Some(SupervisorArgs {
+                project_root: project_root
+                    .ok_or("Missing internal --project-root")?
+                    .canonicalize()?,
+                host_port: host_port.ok_or("Missing internal --host-port")?,
+                startup_token: startup_token.ok_or("Missing internal --startup-token")?,
+            }),
+        })
+    }
+
     let mut parser = lexopt::Parser::from_env();
     let mut disk = None;
     let mut command = None;
@@ -602,6 +743,25 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
             }
             Value(value) => {
                 let value = os_to_string(value, "argument")?;
+                if disk.is_none() && command.is_none() && value == "ssh" {
+                    command = Some(parse_ssh_command(&mut parser)?);
+                    break;
+                }
+                if disk.is_none() && command.is_none() && value == "__ssh-supervisor" {
+                    command = Some(parse_supervisor_command(&mut parser)?);
+                    network_mode = NetworkMode::Nat;
+                    if let Some(CliCommand::Run {
+                        supervisor: Some(config),
+                        ..
+                    }) = command.as_ref()
+                    {
+                        forwards.push(PortForward {
+                            host_port: config.host_port,
+                            guest_port: 22,
+                        });
+                    }
+                    break;
+                }
                 if disk.is_none() && command.is_none() && value == "provision" {
                     command = Some(parse_provision_command(&mut parser)?);
                     break;
@@ -613,6 +773,20 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
             }
             _ => return Err(arg.unexpected().into()),
         }
+    }
+
+    if matches!(command.as_ref(), Some(CliCommand::Ssh(_)))
+        && (no_default_mounts
+            || image_seen
+            || !env_vars.is_empty()
+            || !mounts.is_empty()
+            || !login_actions.is_empty()
+            || !forwards.is_empty()
+            || network_mode != NetworkMode::Nat
+            || cpu_count != DEFAULT_CPU_COUNT
+            || ram_bytes != DEFAULT_RAM_BYTES)
+    {
+        return Err("SSH commands cannot be combined with VM boot options".into());
     }
 
     if !forwards.is_empty() && network_mode == NetworkMode::VzNat {
@@ -628,7 +802,11 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
     Ok(CliArgs {
         command: match command {
             Some(command) => command,
-            None => CliCommand::Run { disk, image },
+            None => CliCommand::Run {
+                disk,
+                image,
+                supervisor: None,
+            },
         },
         version,
         help,
@@ -770,12 +948,14 @@ pub enum VmInput {
 enum VmOutput {
     LoginActionTimeout { action: String, timeout: Duration },
     LoginActionFailed { action: String, status: u8 },
+    LoginActionsComplete,
 }
 
 #[derive(Default)]
 pub struct OutputMonitor {
     buffer: Mutex<String>,
     condvar: Condvar,
+    closed: AtomicBool,
 }
 
 impl OutputMonitor {
@@ -784,6 +964,11 @@ impl OutputMonitor {
             .lock()
             .unwrap()
             .push_str(&String::from_utf8_lossy(bytes));
+        self.condvar.notify_all();
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::Relaxed);
         self.condvar.notify_all();
     }
 
@@ -797,7 +982,7 @@ impl OutputMonitor {
                     found = true;
                     false
                 } else {
-                    true
+                    !self.closed.load(Ordering::Relaxed)
                 }
             })
             .unwrap();
@@ -830,7 +1015,7 @@ impl OutputMonitor {
                     line_start = line_end + 1;
                 }
 
-                true
+                !self.closed.load(Ordering::Relaxed)
             })
             .unwrap();
 
@@ -1046,6 +1231,11 @@ export VIBE_PROVISION_SCRIPTS='{}'",
             prepare_network_backend,
             cpu_count,
             ram_bytes,
+            VmIoMode::InteractiveConsole,
+            None,
+            None,
+            None,
+            |_| Ok(()),
         )?;
 
         fs::rename(&tmp_raw, image_raw)?;
@@ -1082,17 +1272,24 @@ pub struct IoContext {
     stdout_thread: thread::JoinHandle<()>,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum VmIoMode {
+    InteractiveConsole,
+    Headless,
+}
+
 #[must_use]
 pub fn create_pipe() -> (OwnedFd, OwnedFd) {
     let (read_stream, write_stream) = UnixStream::pair().expect("Failed to create socket pair");
     (read_stream.into(), write_stream.into())
 }
 
-pub fn spawn_vm_io(
+fn spawn_vm_io(
     output_monitor: Arc<OutputMonitor>,
     vm_output_fd: OwnedFd,
     vm_input_fd: OwnedFd,
     resize_control_fd: OwnedFd,
+    mode: VmIoMode,
 ) -> IoContext {
     let (input_tx, input_rx): (Sender<VmInput>, Receiver<VmInput>) = mpsc::channel();
 
@@ -1146,6 +1343,9 @@ pub fn spawn_vm_io(
         let wakeup_read = wakeup_read.try_clone().unwrap();
 
         move || {
+            if mode == VmIoMode::Headless {
+                return;
+            }
             let mut buf = [0u8; 1024];
             loop {
                 match poll_with_wakeup(libc::STDIN_FILENO, wakeup_read.as_raw_fd(), &mut buf) {
@@ -1169,6 +1369,7 @@ pub fn spawn_vm_io(
     let stdout_thread = thread::spawn({
         let raw_guard = raw_guard.clone();
         let wakeup_read = wakeup_read.try_clone().unwrap();
+        let output_monitor = output_monitor.clone();
 
         move || {
             let mut stdout = std::io::stdout().lock();
@@ -1179,23 +1380,25 @@ pub fn spawn_vm_io(
                     PollResult::Shutdown | PollResult::Error => break,
                     PollResult::Spurious => continue,
                     PollResult::Ready(bytes) => {
-                        // enable raw mode, if we haven't already
-                        let mut raw_guard_inner = raw_guard.lock().unwrap();
-                        if raw_guard_inner.is_none()
-                            && let Ok(guard) = enable_raw_mode(libc::STDIN_FILENO)
-                        {
-                            *raw_guard_inner = Some(guard);
+                        if mode == VmIoMode::InteractiveConsole {
+                            // enable raw mode, if we haven't already
+                            let mut raw_guard_inner = raw_guard.lock().unwrap();
+                            if raw_guard_inner.is_none()
+                                && let Ok(guard) = enable_raw_mode(libc::STDIN_FILENO)
+                            {
+                                *raw_guard_inner = Some(guard);
+                            }
+                            if let Err(e) = stdout.write_all(bytes) {
+                                eprintln!("[stdout_thread] write failed: {e:?}");
+                                break;
+                            }
+                            let _ = stdout.flush();
                         }
-
-                        if let Err(e) = stdout.write_all(bytes) {
-                            eprintln!("[stdout_thread] write failed: {e:?}");
-                            break;
-                        }
-                        let _ = stdout.flush();
                         output_monitor.push(bytes);
                     }
                 }
             }
+            output_monitor.close();
         }
     });
 
@@ -1220,6 +1423,10 @@ pub fn spawn_vm_io(
         let wakeup_read = wakeup_read.try_clone().unwrap();
         move || {
             let mut writer = std::fs::File::from(resize_control_fd);
+            if mode == VmIoMode::Headless {
+                let _ = writer.write_all(b"24 80\n");
+                return;
+            }
             let resize_fd = writer.as_raw_fd();
             let flags = unsafe { libc::fcntl(resize_fd, libc::F_GETFL) };
             if flags >= 0 {
@@ -1478,6 +1685,7 @@ fn spawn_login_actions_thread(
     output_monitor: Arc<OutputMonitor>,
     input_tx: mpsc::Sender<VmInput>,
     vm_output_tx: mpsc::Sender<VmOutput>,
+    marker_scope: Option<String>,
 ) -> thread::JoinHandle<()> {
     fn send_text(input_tx: &mpsc::Sender<VmInput>, mut text: String) {
         // Type the newline so the command is actually submitted.
@@ -1507,7 +1715,10 @@ fn spawn_login_actions_thread(
                     send_text(&input_tx, text);
                 }
                 Script { name, content } => {
-                    let id = format!("script_{index}");
+                    let id = format!(
+                        "{}_script_{index}",
+                        marker_scope.as_deref().unwrap_or("interactive")
+                    );
                     let (command, status_marker) = script_command_and_status_marker(&id, &content);
                     send_text(&input_tx, command);
                     match output_monitor.wait_for_line_after(&status_marker, SCRIPT_ACTION_TIMEOUT)
@@ -1533,6 +1744,7 @@ fn spawn_login_actions_thread(
                 }
             }
         }
+        let _ = vm_output_tx.send(VmOutput::LoginActionsComplete);
     })
 }
 
@@ -1546,7 +1758,16 @@ fn run_vm(
     ) -> Result<PreparedNetworkBackend, Box<dyn std::error::Error>>,
     cpu_count: usize,
     ram_bytes: u64,
+    io_mode: VmIoMode,
+    control_rx: Option<Receiver<ssh_runtime::VmControl>>,
+    marker_scope: Option<String>,
+    disk_lock: Option<ssh_runtime::FileLock>,
+    mut state_changed: impl FnMut(&str) -> Result<(), Box<dyn std::error::Error>>,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    let _disk_lock = match disk_lock {
+        Some(lock) => lock,
+        None => ssh_runtime::acquire_disk_lock(disk_path)?,
+    };
     let (vm_reads_from, we_write_to) = create_pipe();
     let (we_read_from, vm_writes_to) = create_pipe();
     let (resize_reads_from, we_write_resize_to) = create_pipe();
@@ -1615,6 +1836,7 @@ fn run_vm(
         we_read_from,
         we_write_to,
         we_write_resize_to,
+        io_mode,
     );
 
     let mut all_login_actions = vec![
@@ -1650,13 +1872,40 @@ fn run_vm(
         for share in directory_shares {
             let staging = format!("/mnt/shared/{}", share.tag());
             let guest = share.guest.to_string_lossy();
-            all_login_actions.push(Send(format!(" mkdir -p {guest}")));
-            all_login_actions.push(Send(format!(" mount --bind {staging} {guest}")));
+            let quoted_staging = format!("'{}'", shell_single_quote(&staging));
+            let quoted_guest = format!("'{}'", shell_single_quote(&guest));
+            all_login_actions.push(Send(format!(" mkdir -p {quoted_guest}")));
+            all_login_actions.push(Send(format!(
+                " mount --bind {quoted_staging} {quoted_guest}"
+            )));
         }
     }
 
     for a in login_actions {
         all_login_actions.push(a.clone());
+    }
+
+    if io_mode == VmIoMode::Headless {
+        // The base image intentionally powers off from /root/.bash_logout so
+        // exiting the foreground serial shell stops an ordinary `vibe` VM.
+        // SSH logout must not do that. Mask the file for this boot only; an
+        // explicit guest poweroff still stops the supervisor normally.
+        let mut setup = String::from(
+            "set -e\nif [ -f /root/.bash_logout ]; then mount --bind /dev/null /root/.bash_logout; fi\n",
+        );
+        for action in all_login_actions.drain(3..) {
+            match action {
+                Send(command) => {
+                    setup.push_str(&command);
+                    setup.push('\n');
+                }
+                _ => return Err("Headless SSH setup only supports tracked setup commands".into()),
+            }
+        }
+        all_login_actions.push(Script {
+            name: "SSH setup".into(),
+            content: setup,
+        });
     }
 
     let (vm_output_tx, vm_output_rx) = mpsc::channel::<VmOutput>();
@@ -1665,6 +1914,7 @@ fn run_vm(
         output_monitor.clone(),
         io_ctx.input_tx.clone(),
         vm_output_tx,
+        marker_scope,
     );
 
     let mut last_state = None;
@@ -1679,6 +1929,8 @@ fn run_vm(
             vm.stopWithCompletionHandler(&handler);
         }
     };
+    let mut stopping_since = None;
+    let mut fallback_stop_requested = false;
     loop {
         unsafe {
             NSRunLoop::mainRunLoop().runMode_beforeDate(
@@ -1698,17 +1950,40 @@ fn run_vm(
                     "Login action ({action}) timed out after {timeout:?}; shutting down."
                 ));
                 request_stop();
-                break;
+                stopping_since = Some(Instant::now());
             }
             Ok(VmOutput::LoginActionFailed { action, status }) => {
                 exit_result = Err(format!(
                     "Login action ({action}) failed with exit code {status}"
                 ));
                 request_stop();
-                break;
+                stopping_since = Some(Instant::now());
+            }
+            Ok(VmOutput::LoginActionsComplete) => {
+                if io_mode == VmIoMode::Headless {
+                    state_changed("running")?;
+                }
             }
             Err(mpsc::TryRecvError::Empty) => {}
             Err(mpsc::TryRecvError::Disconnected) => {}
+        }
+        if let Some(receiver) = &control_rx
+            && matches!(receiver.try_recv(), Ok(ssh_runtime::VmControl::Stop))
+            && stopping_since.is_none()
+        {
+            state_changed("stopping")?;
+            request_stop();
+            stopping_since = Some(Instant::now());
+        }
+        if stopping_since.is_some_and(|started| started.elapsed() >= Duration::from_secs(10))
+            && unsafe { vm.canStop() }
+            && !fallback_stop_requested
+        {
+            let handler = RcBlock::new(|_error: *mut NSError| {});
+            unsafe {
+                vm.stopWithCompletionHandler(&handler);
+            }
+            fallback_stop_requested = true;
         }
         if state != objc2_virtualization::VZVirtualMachineState::Running {
             //eprintln!("VM stopped with state: {:?}", state);
@@ -1716,6 +1991,7 @@ fn run_vm(
         }
     }
 
+    output_monitor.close();
     let _ = login_actions_thread.join();
 
     io_ctx.shutdown();
