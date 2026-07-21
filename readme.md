@@ -95,13 +95,20 @@ The disk state persists until you delete it.
 
 For a persistent, reconnectable VM, use SSH mode:
 
-    vibe ssh
+    vibe ssh [--forward HOST_PORT:GUEST_PORT ...]
 
 This starts the current project's VM in a detached supervisor and connects with
 the host `/usr/bin/ssh` client. Logging out, pressing Ctrl-D, losing the
 connection, or closing the terminal leaves the VM running. Running `vibe ssh`
 again from the same canonical project folder reconnects to that VM. Different
 projects receive separate loopback ports starting at 2222.
+
+Add repeatable loopback-only TCP forwards alongside SSH with `--forward`:
+
+    vibe ssh --forward 8080:80 --forward 3000:3000
+
+Port forwards are fixed when supervisor starts. To change them for running VM,
+stop VM first, then restart it with desired `--forward` values.
 
 List and stop live SSH-managed VMs with:
 
@@ -141,7 +148,7 @@ If you don't want this, you can make your own `.raw` disk images and copy them i
 ```
 vibe [OPTIONS] [LOGIN-ACTIONS ...] [path/to/disk.raw]
 vibe provision [PROVISIONING_OPTIONS] [@built-in | path/to/script.sh ...]
-vibe ssh [--list | --stop ID]
+vibe ssh [--forward HOST_PORT:GUEST_PORT ... | --list | --stop ID]
 
 Options:
 
