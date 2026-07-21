@@ -407,7 +407,11 @@ pub fn connect_command(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let identity = home.join(".ssh/vibe_ed25519");
     if !identity.is_file() {
-        return Err(format!("SSH identity is missing or not a regular file: {}. Provision the image with @ssh and ensure its authorized key matches this identity.", identity.display()).into());
+        return Err(format!(
+            "SSH identity is missing or not a regular file: {}. Recreate the image after creating the Vibe SSH identity.",
+            identity.display()
+        )
+        .into());
     }
     if !Path::new("/usr/bin/ssh").is_file() {
         return Err("Required SSH client not found at /usr/bin/ssh".into());
@@ -435,6 +439,11 @@ pub fn connect_command(
             }
             (record, canonical.join(".vibe/vibe-ssh-supervisor.log"))
         } else {
+            let instance_raw = canonical
+                .join(super::INSTANCE_DIR_NAME)
+                .join(super::INSTANCE_DISK_IMAGE_NAME);
+            let default_raw = cache_dir.join(format!("{}.raw", super::DEFAULT_IMAGE_NAME));
+            super::ensure_instance_disk(&instance_raw, &default_raw)?;
             let port = allocate_port(&live, forwards)?;
             let token = random_token()?;
             println!(
@@ -479,7 +488,11 @@ pub fn connect_command(
         thread::sleep(Duration::from_millis(500));
     }
     if Instant::now() >= deadline {
-        return Err(format!("SSH did not become ready. Ensure this VM image was provisioned with @ssh and that {} matches the authorized public key.", identity.display()).into());
+        return Err(format!(
+            "SSH did not become ready. Existing images are not updated automatically; recreate this image if its authorized key does not match {}.",
+            identity.display()
+        )
+        .into());
     }
     println!("Connected to {} (ID {}).", record.project_name, record.id);
     let guest_path = format!("/root/{}", record.project_name);
@@ -505,7 +518,11 @@ fn ssh_common_args(identity: &Path, port: u16) -> Vec<String> {
         "-o".into(),
         "IdentitiesOnly=yes".into(),
         "-o".into(),
-        "StrictHostKeyChecking=accept-new".into(),
+        "StrictHostKeyChecking=no".into(),
+        "-o".into(),
+        "UserKnownHostsFile=/dev/null".into(),
+        "-o".into(),
+        "LogLevel=ERROR".into(),
         "-p".into(),
         port.to_string(),
     ]

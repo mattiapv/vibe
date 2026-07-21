@@ -112,6 +112,15 @@ resize2fs /dev/vda1
 # Set hostname to "vibe" so it's clear that you're inside the VM.
 hostnamectl set-hostname vibe
 
+# Enable SSH when the user created a host Vibe identity.
+if [[ -n "${VIBE_SSH_PUBLIC_KEY:-}" ]]; then
+  apt install --no-install-recommends --yes openssh-server
+  install -d -m 700 /root/.ssh
+  printf '%s\n' "${VIBE_SSH_PUBLIC_KEY}" > /root/.ssh/authorized_keys
+  chmod 600 /root/.ssh/authorized_keys
+  systemctl enable ssh
+fi
+
 # Enable true color support in the terminal
 echo "export COLORTERM=truecolor" >> .bashrc
 

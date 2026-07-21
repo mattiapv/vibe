@@ -97,6 +97,10 @@ For a persistent, reconnectable VM, use SSH mode:
 
     vibe ssh [--forward HOST_PORT:GUEST_PORT ...]
 
+`vibe ssh` requires an existing `~/.cache/vibe/default.raw`. On a new
+installation, run `vibe` first, wait for provisioning to finish, then exit the
+VM before starting SSH mode.
+
 This starts the current project's VM in a detached supervisor and connects with
 the host `/usr/bin/ssh` client. Logging out, pressing Ctrl-D, losing the
 connection, or closing the terminal leaves the VM running. Running `vibe ssh`
@@ -119,12 +123,17 @@ List and stop live SSH-managed VMs with:
 supervisor and removes the live record. Stale live records left by a crash or
 host reboot are cleaned by the next SSH command.
 
-SSH mode uses the fixed host identity `~/.ssh/vibe_ed25519`. The selected image
-must have been provisioned with `@ssh`, and the public key installed by
-`provisioning/ssh.sh` must match that identity. The private key is never copied
-into the guest. Supervisor diagnostics are written to
-`.vibe/vibe-ssh-supervisor.log`; networking diagnostics remain in
-`.vibe/vibe-usernet.log`.
+SSH mode uses the fixed host identity `~/.ssh/vibe_ed25519`. When provisioning
+an image for the first time, Vibe asks permission to create this Ed25519
+identity and its `.pub` file with no passphrase. `vibe ssh` requires that pair
+to exist and never generates or installs keys into an existing image. Every
+image created by `vibe provision`, including the automatic default image,
+receives the public key and OpenSSH configuration through the always-run base
+provisioning script when key creation is accepted. Declining creates a
+console-only image and continues provisioning normally. Existing template and
+instance disks are not updated. The private key is never copied into the guest. Supervisor
+diagnostics are written to `.vibe/vibe-ssh-supervisor.log`; networking
+diagnostics remain in `.vibe/vibe-usernet.log`.
 
 Where does this `default.raw` raw disk image come from?
 

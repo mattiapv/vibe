@@ -8,6 +8,7 @@ use std::{
     os::{
         fd::RawFd,
         unix::{
+            fs::PermissionsExt,
             io::{AsRawFd, IntoRawFd, OwnedFd},
             net::UnixStream,
             process::CommandExt,
@@ -213,6 +214,10 @@ Commands
     if let CliCommand::Ssh(command) = &args.command {
         return match command {
             SshCommand::Connect(forwards) => {
+                if !image_path(&cache_dir, DEFAULT_IMAGE_NAME).exists() {
+                    return Err("vibe ssh requires a provisioned default image. Run `vibe` first, wait for provisioning to finish, then exit the VM and run `vibe ssh` again.".into());
+                }
+                require_vibe_ssh_identity(&home)?;
                 ensure_signed();
                 ssh_runtime::connect_command(&cache_dir, &home, &env::current_dir()?, forwards)
             }
@@ -256,6 +261,7 @@ Commands
             cpu_count,
             ram_bytes,
         } => {
+            let ssh_public_key = ensure_vibe_ssh_identity(&home)?;
             let base_raw = match base {
                 Some(base) if base.contains('/') => PathBuf::from(base),
                 Some(base) => image_path(&cache_dir, &base),
@@ -276,6 +282,7 @@ Commands
                 prepare_provision_network_backend,
                 cpu_count,
                 ram_bytes,
+                &ssh_public_key,
             )
         }
         CliCommand::Run {
@@ -313,6 +320,7 @@ Commands
                         &base_raw,
                         &base_compressed,
                         &template_raw,
+                        &home,
                         std::slice::from_ref(&mise_directory_share),
                         prepare_provision_network_backend,
                     )?;
@@ -423,7 +431,7 @@ Commands
                     VmIoMode::Headless,
                     Some(control_rx),
                     Some(config.startup_token),
-                    Some(disk_lock),
+                    DiskLockMode::Held(disk_lock),
                     |status| runtime.set_status(status),
                 )
                 .map(|_| ());
@@ -443,7 +451,7 @@ Commands
                     VmIoMode::InteractiveConsole,
                     None,
                     None,
-                    None,
+                    DiskLockMode::Acquire,
                     |_| Ok(()),
                 )
                 .map(|_| ())
@@ -883,6 +891,126 @@ fn shell_single_quote(value: &str) -> String {
     value.replace('\'', r"'\''")
 }
 
+fn ensure_vibe_ssh_identity(home: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let ssh_dir = home.join(".ssh");
+    let private_key = ssh_dir.join("vibe_ed25519");
+    let public_key = ssh_dir.join("vibe_ed25519.pub");
+
+    match (private_key.is_file(), public_key.is_file()) {
+        (true, true) => return read_vibe_ssh_public_key(&public_key),
+        (true, false) | (false, true) => {
+            return Err(format!(
+                "Incomplete Vibe SSH identity: expected both {} and {}. Vibe will not replace either file automatically.",
+                private_key.display(),
+                public_key.display()
+            )
+            .into());
+        }
+        (false, false) => {}
+    }
+
+    if private_key.exists() || public_key.exists() {
+        return Err(format!(
+            "Vibe SSH identity paths must be regular files: {} and {}",
+            private_key.display(),
+            public_key.display()
+        )
+        .into());
+    }
+
+    if !Path::new("/usr/bin/ssh-keygen").is_file() {
+        return Err("Required SSH key generator not found at /usr/bin/ssh-keygen".into());
+    }
+    if ssh_dir.exists() && !ssh_dir.is_dir() {
+        return Err(format!(
+            "SSH directory path is not a directory: {}",
+            ssh_dir.display()
+        )
+        .into());
+    }
+    println!(
+        "To use SSH, Vibe needs to create an Ed25519 key pair in {} ({} and {}).",
+        ssh_dir.display(),
+        private_key.display(),
+        public_key.display()
+    );
+    print!("Continue? [y/N] ");
+    io::stdout().flush()?;
+    let mut response = String::new();
+    io::stdin().read_line(&mut response)?;
+    if !matches!(response.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        println!("Continuing without SSH support.");
+        return Ok(String::new());
+    }
+
+    if !ssh_dir.exists() {
+        fs::create_dir_all(&ssh_dir)?;
+        fs::set_permissions(&ssh_dir, fs::Permissions::from_mode(0o700))?;
+    }
+
+    let status = Command::new("/usr/bin/ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-C", "vibe ssh key", "-f"])
+        .arg(&private_key)
+        .status()?;
+    if !status.success() {
+        return Err("Failed to generate Vibe SSH identity".into());
+    }
+    fs::set_permissions(&private_key, fs::Permissions::from_mode(0o600))?;
+    fs::set_permissions(&public_key, fs::Permissions::from_mode(0o644))?;
+
+    read_vibe_ssh_public_key(&public_key)
+}
+
+fn require_vibe_ssh_identity(home: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let private_key = home.join(".ssh/vibe_ed25519");
+    let public_key = home.join(".ssh/vibe_ed25519.pub");
+    if !private_key.is_file() || !public_key.is_file() {
+        return Err(format!(
+            "vibe ssh requires an existing Vibe SSH identity at {} and {}. Existing images cannot be updated automatically; restore the matching key pair or recreate the default and project instance before running `vibe ssh`.",
+            private_key.display(),
+            public_key.display()
+        )
+        .into());
+    }
+
+    read_vibe_ssh_public_key(&public_key)
+}
+
+fn read_vibe_ssh_public_key(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let contents = fs::read_to_string(path)?;
+    let line = contents.trim_end_matches(|character| character == '\r' || character == '\n');
+    if line.is_empty() || line.contains('\r') || line.contains('\n') {
+        return Err(format!(
+            "Vibe SSH public key must contain exactly one key: {}",
+            path.display()
+        )
+        .into());
+    }
+
+    let mut fields = line.split_whitespace();
+    let key_type = fields.next();
+    let key_data = fields.next();
+    if key_type != Some("ssh-ed25519") || key_data.is_none() {
+        return Err(format!(
+            "Vibe SSH public key must be a valid Ed25519 key: {}",
+            path.display()
+        )
+        .into());
+    }
+    let status = Command::new("/usr/bin/ssh-keygen")
+        .args(["-l", "-f"])
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if !status.success() {
+        return Err(format!("Vibe SSH public key is invalid: {}", path.display()).into());
+    }
+
+    Ok(format!("ssh-ed25519 {} vibe ssh key", key_data.unwrap()))
+}
+
 fn script_command_and_status_marker(id: &str, script: &str) -> (String, String) {
     let marker = "VIBE_SCRIPT_EOF";
     let guest_dir = "/tmp/vibe-scripts";
@@ -1147,6 +1275,7 @@ fn ensure_default_image(
     base_raw: &Path,
     base_compressed: &Path,
     default_raw: &Path,
+    home: &Path,
     directory_shares: &[DirectoryShare],
     prepare_network_backend: impl Fn(
         Option<&Path>,
@@ -1156,6 +1285,7 @@ fn ensure_default_image(
         return Ok(());
     }
 
+    let ssh_public_key = ensure_vibe_ssh_identity(home)?;
     ensure_base_image(base_raw, base_compressed)?;
 
     // Provision with everything, so folks who don't read README have a "it just works" experience.
@@ -1180,6 +1310,7 @@ fn ensure_default_image(
         prepare_network_backend,
         DEFAULT_CPU_COUNT,
         DEFAULT_RAM_BYTES,
+        &ssh_public_key,
     )
 }
 
@@ -1195,6 +1326,7 @@ fn provision_image(
     ) -> Result<PreparedNetworkBackend, Box<dyn std::error::Error>>,
     cpu_count: usize,
     ram_bytes: u64,
+    ssh_public_key: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let image_name = image_raw
         .file_stem()
@@ -1252,12 +1384,14 @@ fn provision_image(
 export VIBE_PROVISION_BASE='{}'\n\
 export VIBE_GIT_SHA='{}'\n\
 export VIBE_BUILD_DATE='{}'\n\
-export VIBE_PROVISION_SCRIPTS='{}'",
+export VIBE_PROVISION_SCRIPTS='{}'\n\
+export VIBE_SSH_PUBLIC_KEY='{}'",
             shell_single_quote(&image_name),
             shell_single_quote(&base_raw.to_string_lossy()),
             env!("GIT_SHA"),
             env!("BUILD_DATE"),
-            shell_single_quote(&script_names)
+            shell_single_quote(&script_names),
+            shell_single_quote(ssh_public_key)
         )));
 
         for script in scripts {
@@ -1285,7 +1419,7 @@ export VIBE_PROVISION_SCRIPTS='{}'",
             VmIoMode::InteractiveConsole,
             None,
             None,
-            None,
+            DiskLockMode::Skip,
             |_| Ok(()),
         )?;
 
@@ -1327,6 +1461,12 @@ pub struct IoContext {
 enum VmIoMode {
     InteractiveConsole,
     Headless,
+}
+
+enum DiskLockMode {
+    Acquire,
+    Held(ssh_runtime::FileLock),
+    Skip,
 }
 
 #[must_use]
@@ -1812,12 +1952,13 @@ fn run_vm(
     io_mode: VmIoMode,
     control_rx: Option<Receiver<ssh_runtime::VmControl>>,
     marker_scope: Option<String>,
-    disk_lock: Option<ssh_runtime::FileLock>,
+    disk_lock: DiskLockMode,
     mut state_changed: impl FnMut(&str) -> Result<(), Box<dyn std::error::Error>>,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let _disk_lock = match disk_lock {
-        Some(lock) => lock,
-        None => ssh_runtime::acquire_disk_lock(disk_path)?,
+        DiskLockMode::Acquire => Some(ssh_runtime::acquire_disk_lock(disk_path)?),
+        DiskLockMode::Held(lock) => Some(lock),
+        DiskLockMode::Skip => None,
     };
     let (vm_reads_from, we_write_to) = create_pipe();
     let (we_read_from, vm_writes_to) = create_pipe();
