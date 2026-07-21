@@ -1,6 +1,7 @@
 //! Vibe's default NAT uses a bundled gVisor/Lima-style user-mode network stack.
 //! The helper receives a connected VZ datagram fd and exits when Vibe drops the liveness fd.
 
+use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::{self, BufRead, BufReader, Read},
@@ -28,7 +29,7 @@ pub enum NetworkMode {
     VzNat,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PortForward {
     pub host_port: u16,
     pub guest_port: u16,

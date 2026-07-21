@@ -1,3 +1,4 @@
+use crate::networking::PortForward;
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
@@ -39,6 +40,8 @@ pub struct RuntimeRecord {
     pub disk_path: String,
     pub host_port: u16,
     pub guest_port: u16,
+    #[serde(default)]
+    pub forwards: Vec<PortForward>,
     pub control_socket: String,
     pub started_at_unix_seconds: u64,
 }
@@ -254,9 +257,15 @@ pub fn random_token() -> io::Result<String> {
 
 use std::io::Read;
 
-pub fn allocate_port(live: &[RuntimeRecord]) -> Result<u16, Box<dyn std::error::Error>> {
+pub fn allocate_port(
+    live: &[RuntimeRecord],
+    forwards: &[PortForward],
+) -> Result<u16, Box<dyn std::error::Error>> {
     for port in SSH_BASE_PORT..=u16::MAX {
         if live.iter().any(|r| r.host_port == port) {
+            continue;
+        }
+        if forwards.iter().any(|forward| forward.host_port == port) {
             continue;
         }
         if TcpListener::bind(("127.0.0.1", port)).is_ok() {
@@ -271,6 +280,7 @@ pub fn spawn_supervisor(
     project_root: &Path,
     port: u16,
     token: &str,
+    forwards: &[PortForward],
 ) -> Result<(String, PathBuf), Box<dyn std::error::Error>> {
     let executable = std::env::current_exe()?;
     let instance_dir = project_root.join(".vibe");
@@ -286,10 +296,13 @@ pub fn spawn_supervisor(
     command
         .args(["__ssh-supervisor", "--project-root"])
         .arg(project_root)
-        .args(["--host-port", &port.to_string(), "--startup-token", token])
-        .stdin(Stdio::null())
-        .stdout(stdout)
-        .stderr(stderr);
+        .args(["--host-port", &port.to_string(), "--startup-token", token]);
+    for forward in forwards {
+        command
+            .arg("--forward")
+            .arg(format!("{}:{}", forward.host_port, forward.guest_port));
+    }
+    command.stdin(Stdio::null()).stdout(stdout).stderr(stderr);
     unsafe {
         command.pre_exec(|| {
             if libc::setsid() == -1 {
@@ -390,6 +403,7 @@ pub fn connect_command(
     cache_dir: &Path,
     home: &Path,
     project_root: &Path,
+    forwards: &[PortForward],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let identity = home.join(".ssh/vibe_ed25519");
     if !identity.is_file() {
@@ -407,15 +421,27 @@ pub fn connect_command(
             .find(|r| Path::new(&r.project_root) == canonical)
             .cloned()
         {
+            if !forwards.is_empty()
+                && (forwards.len() != record.forwards.len()
+                    || forwards
+                        .iter()
+                        .any(|forward| !record.forwards.contains(forward)))
+            {
+                return Err(format!(
+                    "SSH-managed VM {} is already running with different port forwards. Stop it with `vibe ssh --stop {}` before changing --forward values.",
+                    record.id, record.id
+                )
+                .into());
+            }
             (record, canonical.join(".vibe/vibe-ssh-supervisor.log"))
         } else {
-            let port = allocate_port(&live)?;
+            let port = allocate_port(&live, forwards)?;
             let token = random_token()?;
             println!(
                 "Starting SSH VM for {} on 127.0.0.1:{port}...",
                 canonical.display()
             );
-            let (id, log) = spawn_supervisor(cache_dir, &canonical, port, &token)?;
+            let (id, log) = spawn_supervisor(cache_dir, &canonical, port, &token, forwards)?;
             let record = cleanup_and_list(cache_dir)?
                 .into_iter()
                 .find(|r| r.id == id)
@@ -503,6 +529,7 @@ impl SupervisorRuntime {
         project_root: &Path,
         port: u16,
         token: String,
+        forwards: Vec<PortForward>,
         control_tx: Sender<VmControl>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         create_private_dir(&running_dir(cache_dir))?;
@@ -531,6 +558,7 @@ impl SupervisorRuntime {
                 .into_owned(),
             host_port: port,
             guest_port: 22,
+            forwards,
             control_socket: socket.to_string_lossy().into_owned(),
             started_at_unix_seconds: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
         };

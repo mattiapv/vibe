@@ -161,7 +161,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 vibe [OPTIONS] [LOGIN-ACTIONS ...] [path/to/disk.raw]
 vibe provision [PROVISIONING_OPTIONS] [@built-in | path/to/script.sh ...]
-vibe ssh [--list | --stop ID]
+vibe ssh [--forward HOST_PORT:GUEST_PORT ... | --list | --stop ID]
 
 Options:
 
@@ -197,7 +197,7 @@ Provisioning creates a new named image by running (built-in) scripts. Options:
 
 Commands
 
-  ssh                                                       Start or reconnect to a persistent VM over SSH.
+  ssh [--forward HOST_PORT:GUEST_PORT ...]                  Start or reconnect to a persistent VM over SSH, with optional extra port forwards.
   ssh --list                                                List currently running SSH-managed VMs.
   ssh --stop ID                                             Gracefully stop one SSH-managed VM.
 
@@ -212,9 +212,9 @@ Commands
     let cache_dir = cache_home.join("vibe");
     if let CliCommand::Ssh(command) = &args.command {
         return match command {
-            SshCommand::Connect => {
+            SshCommand::Connect(forwards) => {
                 ensure_signed();
-                ssh_runtime::connect_command(&cache_dir, &home, &env::current_dir()?)
+                ssh_runtime::connect_command(&cache_dir, &home, &env::current_dir()?, forwards)
             }
             SshCommand::List => ssh_runtime::list_command(&cache_dir),
             SshCommand::Stop(id) => ssh_runtime::stop_command(&cache_dir, id),
@@ -409,6 +409,7 @@ Commands
                     &project_root,
                     config.host_port,
                     config.startup_token.clone(),
+                    config.forwards.clone(),
                     control_tx,
                 )?;
                 let result = run_vm(
@@ -484,7 +485,7 @@ enum CliCommand {
 }
 
 enum SshCommand {
-    Connect,
+    Connect(Vec<PortForward>),
     List,
     Stop(String),
 }
@@ -493,6 +494,7 @@ struct SupervisorArgs {
     project_root: PathBuf,
     host_port: u16,
     startup_token: String,
+    forwards: Vec<PortForward>,
 }
 
 fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
@@ -594,13 +596,32 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
     fn parse_ssh_command(
         parser: &mut lexopt::Parser,
     ) -> Result<CliCommand, Box<dyn std::error::Error>> {
-        let mut command = SshCommand::Connect;
+        let mut command = SshCommand::Connect(Vec::new());
         while let Some(arg) = parser.next()? {
             match arg {
-                Long("list") if matches!(command, SshCommand::Connect) => {
+                Long("forward") if matches!(command, SshCommand::Connect(_)) => {
+                    let value = os_to_string(parser.value()?, "--forward")?;
+                    let forward = PortForward::parse(&value)?;
+                    let SshCommand::Connect(forwards) = &mut command else {
+                        unreachable!()
+                    };
+                    if forwards
+                        .iter()
+                        .any(|existing| existing.host_port == forward.host_port)
+                    {
+                        return Err(format!(
+                            "Duplicate --forward host port: {}",
+                            forward.host_port
+                        )
+                        .into());
+                    }
+                    forwards.push(forward);
+                }
+                Long("list") if matches!(&command, SshCommand::Connect(forwards) if forwards.is_empty()) => {
                     command = SshCommand::List
                 }
-                Long("stop") if matches!(command, SshCommand::Connect) => {
+                Long("stop") if matches!(&command, SshCommand::Connect(forwards) if forwards.is_empty()) =>
+                {
                     let id = os_to_string(parser.value()?, "--stop")?;
                     if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit()) {
                         return Err(
@@ -608,6 +629,11 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
                         );
                     }
                     command = SshCommand::Stop(id);
+                }
+                Long("list") | Long("stop") if matches!(command, SshCommand::Connect(_)) => {
+                    return Err(
+                        "vibe ssh --forward cannot be combined with --list or --stop".into(),
+                    );
                 }
                 Long("list") | Long("stop") => {
                     return Err("vibe ssh --list and --stop are mutually exclusive".into());
@@ -630,6 +656,7 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
         let mut project_root = None;
         let mut host_port = None;
         let mut startup_token = None;
+        let mut forwards = Vec::new();
         while let Some(arg) = parser.next()? {
             match arg {
                 Long("project-root") => project_root = Some(PathBuf::from(parser.value()?)),
@@ -639,8 +666,30 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 Long("startup-token") => {
                     startup_token = Some(os_to_string(parser.value()?, "--startup-token")?)
                 }
+                Long("forward") => {
+                    let value = os_to_string(parser.value()?, "--forward")?;
+                    let forward = PortForward::parse(&value)?;
+                    if forwards
+                        .iter()
+                        .any(|existing: &PortForward| existing.host_port == forward.host_port)
+                    {
+                        return Err(format!(
+                            "Duplicate --forward host port: {}",
+                            forward.host_port
+                        )
+                        .into());
+                    }
+                    forwards.push(forward);
+                }
                 _ => return Err(arg.unexpected().into()),
             }
+        }
+        let host_port = host_port.ok_or("Missing internal --host-port")?;
+        if forwards
+            .iter()
+            .any(|forward| forward.host_port == host_port)
+        {
+            return Err(format!("--forward host port {host_port} conflicts with SSH port").into());
         }
         Ok(CliCommand::Run {
             disk: None,
@@ -649,8 +698,9 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 project_root: project_root
                     .ok_or("Missing internal --project-root")?
                     .canonicalize()?,
-                host_port: host_port.ok_or("Missing internal --host-port")?,
+                host_port,
                 startup_token: startup_token.ok_or("Missing internal --startup-token")?,
+                forwards,
             }),
         })
     }
@@ -755,6 +805,7 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
                         ..
                     }) = command.as_ref()
                     {
+                        forwards.extend(config.forwards.iter().cloned());
                         forwards.push(PortForward {
                             host_port: config.host_port,
                             guest_port: 22,
