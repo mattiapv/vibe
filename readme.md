@@ -118,6 +118,7 @@ List and stop live SSH-managed VMs with:
 
     vibe ssh --list
     vibe ssh --stop ID
+    vibe ssh --stop all
 
 `vibe ssh --list` reports live processes only. A guest `poweroff` also ends its
 supervisor and removes the live record. Stale live records left by a crash or
@@ -157,7 +158,7 @@ If you don't want this, you can make your own `.raw` disk images and copy them i
 ```
 vibe [OPTIONS] [LOGIN-ACTIONS ...] [path/to/disk.raw]
 vibe provision [PROVISIONING_OPTIONS] [@built-in | path/to/script.sh ...]
-vibe ssh [--forward HOST_PORT:GUEST_PORT ... | --list | --stop ID]
+vibe ssh [--forward HOST_PORT:GUEST_PORT ... | --list | --stop ID|all]
 
 Options:
 

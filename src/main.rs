@@ -162,7 +162,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 vibe [OPTIONS] [LOGIN-ACTIONS ...] [path/to/disk.raw]
 vibe provision [PROVISIONING_OPTIONS] [@built-in | path/to/script.sh ...]
-vibe ssh [--forward HOST_PORT:GUEST_PORT ... | --list | --stop ID]
+vibe ssh [--forward HOST_PORT:GUEST_PORT ... | --list | --stop ID|all]
 
 Options:
 
@@ -201,6 +201,7 @@ Commands
   ssh [--forward HOST_PORT:GUEST_PORT ...]                  Start or reconnect to a persistent VM over SSH, with optional extra port forwards.
   ssh --list                                                List currently running SSH-managed VMs.
   ssh --stop ID                                             Gracefully stop one SSH-managed VM.
+  ssh --stop all                                            Gracefully stop all SSH-managed VMs.
 
 {}",
                  provisioning_scripts_banner()
@@ -223,6 +224,7 @@ Commands
             }
             SshCommand::List => ssh_runtime::list_command(&cache_dir),
             SshCommand::Stop(id) => ssh_runtime::stop_command(&cache_dir, id),
+            SshCommand::StopAll => ssh_runtime::stop_all_command(&cache_dir),
         };
     }
     let guest_mise_cache = cache_dir.join(".guest-mise-cache");
@@ -496,6 +498,7 @@ enum SshCommand {
     Connect(Vec<PortForward>),
     List,
     Stop(String),
+    StopAll,
 }
 
 struct SupervisorArgs {
@@ -631,12 +634,17 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 Long("stop") if matches!(&command, SshCommand::Connect(forwards) if forwards.is_empty()) =>
                 {
                     let id = os_to_string(parser.value()?, "--stop")?;
-                    if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit()) {
-                        return Err(
-                            "vibe ssh --stop requires a numeric ID from `vibe ssh --list`".into(),
-                        );
+                    if id == "all" {
+                        command = SshCommand::StopAll;
+                    } else {
+                        if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit()) {
+                            return Err(
+                                "vibe ssh --stop requires a numeric ID from `vibe ssh --list` or `all`"
+                                    .into(),
+                            );
+                        }
+                        command = SshCommand::Stop(id);
                     }
-                    command = SshCommand::Stop(id);
                 }
                 Long("list") | Long("stop") if matches!(command, SshCommand::Connect(_)) => {
                     return Err(

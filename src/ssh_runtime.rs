@@ -399,6 +399,51 @@ pub fn stop_command(cache_dir: &Path, id: &str) -> Result<(), Box<dyn std::error
     .into())
 }
 
+pub fn stop_all_command(cache_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let _lock = acquire_start_lock(cache_dir)?;
+    let records = cleanup_and_list(cache_dir)?;
+    if records.is_empty() {
+        println!("No running SSH-managed VMs.");
+        return Ok(());
+    }
+
+    let total = records.len();
+    let mut stopping = Vec::new();
+    let mut errors = Vec::new();
+    for record in records {
+        println!("Stopping {} ({})...", record.project_name, record.id);
+        match request(&record, "stop") {
+            Ok(response) if response.ok => stopping.push(record),
+            Ok(response) => errors.push(format!(
+                "Failed to stop VM {}: {}",
+                record.id, response.error
+            )),
+            Err(error) => errors.push(format!("Failed to stop VM {}: {error}", record.id)),
+        }
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !stopping.is_empty() && Instant::now() < deadline {
+        stopping.retain(|record| is_live(record) || record_path(cache_dir, &record.id).exists());
+        if !stopping.is_empty() {
+            thread::sleep(Duration::from_millis(200));
+        }
+    }
+    for record in stopping {
+        errors.push(format!(
+            "Timed out stopping VM {}; see {}/.vibe/vibe-ssh-supervisor.log",
+            record.id, record.project_root
+        ));
+    }
+
+    if errors.is_empty() {
+        println!("Stopped {total} SSH-managed VM(s).");
+        Ok(())
+    } else {
+        Err(errors.join("\n").into())
+    }
+}
+
 pub fn connect_command(
     cache_dir: &Path,
     home: &Path,
