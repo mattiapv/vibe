@@ -95,7 +95,7 @@ The disk state persists until you delete it.
 
 For a persistent, reconnectable VM, use SSH mode:
 
-    vibe ssh [--forward HOST_PORT:GUEST_PORT ...]
+vibe ssh [--forward HOST_PORT:GUEST_PORT | --forward-all HOST_PORT:GUEST_PORT ...]
 
 `vibe ssh` requires an existing `~/.cache/vibe/default.raw`. On a new
 installation, run `vibe` first, wait for provisioning to finish, then exit the
@@ -107,9 +107,11 @@ connection, or closing the terminal leaves the VM running. Running `vibe ssh`
 again from the same canonical project folder reconnects to that VM. Different
 projects receive separate loopback ports starting at 2222.
 
-Add repeatable loopback-only TCP forwards alongside SSH with `--forward`:
+Add repeatable TCP forwards alongside SSH. `--forward` binds only to `127.0.0.1`; `--forward-all` binds to `0.0.0.0`:
 
     vibe ssh --forward 8080:80 --forward 3000:3000
+
+    vibe ssh --forward-all 8080:80
 
 Port forwards are fixed when supervisor starts. To change them for running VM,
 stop VM first, then restart it with desired `--forward` values.
@@ -174,6 +176,7 @@ Options:
                                                             `nat` uses Vibe's bundled user-mode network stack.
                                                             `vznat` uses Apple's VZNATNetworkDeviceAttachment.
   --forward HOST_PORT:GUEST_PORT                             Forward a loopback-only TCP host port to the VM (repeatable; requires `--network nat`).
+  --forward-all HOST_PORT:GUEST_PORT                         Forward a TCP host port on all interfaces to the VM (repeatable; requires `--network nat`).
   --cpus COUNT                                              Number of virtual CPUs (default 2).
   --ram MEGABYTES                                           RAM size in megabytes (default 2048).
 

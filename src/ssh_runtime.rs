@@ -299,7 +299,11 @@ pub fn spawn_supervisor(
         .args(["--host-port", &port.to_string(), "--startup-token", token]);
     for forward in forwards {
         command
-            .arg("--forward")
+            .arg(if forward.all_interfaces {
+                "--forward-all"
+            } else {
+                "--forward"
+            })
             .arg(format!("{}:{}", forward.host_port, forward.guest_port));
     }
     command.stdin(Stdio::null()).stdout(stdout).stderr(stderr);

@@ -44,7 +44,9 @@ func run() error {
 	parentLivenessFD := flag.Int("parent-liveness-fd", defaultParentLivenessFD, "parent liveness file descriptor")
 	guestMAC := flag.String("mac", "", "guest MAC address")
 	var forwards forwardFlags
+	var forwardAll forwardFlags
 	flag.Var(&forwards, "forward", "forward loopback HOST_PORT to GUEST_PORT")
+	flag.Var(&forwardAll, "forward-all", "forward all-interface HOST_PORT to GUEST_PORT")
 	flag.Parse()
 
 	if flag.NArg() != 0 {
@@ -53,11 +55,18 @@ func run() error {
 	if _, err := net.ParseMAC(*guestMAC); err != nil {
 		return fmt.Errorf("invalid --mac: %w", err)
 	}
-	forwardMap := make(map[string]string, len(forwards))
+	forwardMap := make(map[string]string, len(forwards)+len(forwardAll))
 	for _, forward := range forwards {
 		local := net.JoinHostPort("127.0.0.1", forward.hostPort)
 		if _, exists := forwardMap[local]; exists {
 			return fmt.Errorf("duplicate --forward host port: %s", forward.hostPort)
+		}
+		forwardMap[local] = net.JoinHostPort(guestIP, forward.guestPort)
+	}
+	for _, forward := range forwardAll {
+		local := net.JoinHostPort("0.0.0.0", forward.hostPort)
+		if _, exists := forwardMap[local]; exists {
+			return fmt.Errorf("duplicate --forward-all host port: %s", forward.hostPort)
 		}
 		forwardMap[local] = net.JoinHostPort(guestIP, forward.guestPort)
 	}

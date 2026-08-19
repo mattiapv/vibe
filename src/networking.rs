@@ -33,10 +33,12 @@ pub enum NetworkMode {
 pub struct PortForward {
     pub host_port: u16,
     pub guest_port: u16,
+    #[serde(default)]
+    pub all_interfaces: bool,
 }
 
 impl PortForward {
-    pub fn parse(value: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn parse(value: &str, all_interfaces: bool) -> Result<Self, Box<dyn std::error::Error>> {
         let (host_port, guest_port) = value
             .split_once(':')
             .ok_or_else(|| "--forward must have the form HOST_PORT:GUEST_PORT")?;
@@ -57,6 +59,7 @@ impl PortForward {
         Ok(Self {
             host_port,
             guest_port,
+            all_interfaces,
         })
     }
 }
@@ -112,7 +115,11 @@ impl NetworkMode {
 
                 for forward in forwards {
                     command
-                        .arg("--forward")
+                        .arg(if forward.all_interfaces {
+                            "--forward-all"
+                        } else {
+                            "--forward"
+                        })
                         .arg(format!("{}:{}", forward.host_port, forward.guest_port));
                 }
 

@@ -162,7 +162,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 vibe [OPTIONS] [LOGIN-ACTIONS ...] [path/to/disk.raw]
 vibe provision [PROVISIONING_OPTIONS] [@built-in | path/to/script.sh ...]
-vibe ssh [--forward HOST_PORT:GUEST_PORT ... | --list | --stop ID|all]
+vibe ssh [--forward HOST_PORT:GUEST_PORT | --forward-all HOST_PORT:GUEST_PORT ... | --list | --stop ID|all]
 
 Options:
 
@@ -178,6 +178,7 @@ Options:
                                                             `nat` uses Vibe's bundled user-mode network stack.
                                                             `vznat` uses Apple's VZNATNetworkDeviceAttachment.
   --forward HOST_PORT:GUEST_PORT                             Forward a loopback-only TCP host port to the VM (repeatable; requires `--network nat`).
+  --forward-all HOST_PORT:GUEST_PORT                         Forward a TCP host port on all interfaces to the VM (repeatable; requires `--network nat`).
   --cpus COUNT                                              Number of virtual CPUs (default 2).
   --ram MEGABYTES                                           RAM size in megabytes (default 2048).
 
@@ -198,7 +199,8 @@ Provisioning creates a new named image by running (built-in) scripts. Options:
 
 Commands
 
-  ssh [--forward HOST_PORT:GUEST_PORT ...]                  Start or reconnect to a persistent VM over SSH, with optional extra port forwards.
+  ssh [--forward HOST_PORT:GUEST_PORT | --forward-all HOST_PORT:GUEST_PORT ...]
+                                                            Start or reconnect to a persistent VM over SSH, with optional extra port forwards.
   ssh --list                                                List currently running SSH-managed VMs.
   ssh --stop ID                                             Gracefully stop one SSH-managed VM.
   ssh --stop all                                            Gracefully stop all SSH-managed VMs.
@@ -610,9 +612,17 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
         let mut command = SshCommand::Connect(Vec::new());
         while let Some(arg) = parser.next()? {
             match arg {
-                Long("forward") if matches!(command, SshCommand::Connect(_)) => {
-                    let value = os_to_string(parser.value()?, "--forward")?;
-                    let forward = PortForward::parse(&value)?;
+                option @ (Long("forward") | Long("forward-all"))
+                    if matches!(command, SshCommand::Connect(_)) =>
+                {
+                    let all_interfaces = matches!(option, Long("forward-all"));
+                    let flag = if all_interfaces {
+                        "--forward-all"
+                    } else {
+                        "--forward"
+                    };
+                    let value = os_to_string(parser.value()?, flag)?;
+                    let forward = PortForward::parse(&value, all_interfaces)?;
                     let SshCommand::Connect(forwards) = &mut command else {
                         unreachable!()
                     };
@@ -682,9 +692,15 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 Long("startup-token") => {
                     startup_token = Some(os_to_string(parser.value()?, "--startup-token")?)
                 }
-                Long("forward") => {
-                    let value = os_to_string(parser.value()?, "--forward")?;
-                    let forward = PortForward::parse(&value)?;
+                option @ (Long("forward") | Long("forward-all")) => {
+                    let all_interfaces = matches!(option, Long("forward-all"));
+                    let flag = if all_interfaces {
+                        "--forward-all"
+                    } else {
+                        "--forward"
+                    };
+                    let value = os_to_string(parser.value()?, flag)?;
+                    let forward = PortForward::parse(&value, all_interfaces)?;
                     if forwards
                         .iter()
                         .any(|existing: &PortForward| existing.host_port == forward.host_port)
@@ -774,9 +790,15 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 let value = os_to_string(parser.value()?, "--network")?;
                 network_mode = NetworkMode::parse(&value)?;
             }
-            Long("forward") => {
-                let value = os_to_string(parser.value()?, "--forward")?;
-                let forward = PortForward::parse(&value)?;
+            option @ (Long("forward") | Long("forward-all")) => {
+                let all_interfaces = matches!(option, Long("forward-all"));
+                let flag = if all_interfaces {
+                    "--forward-all"
+                } else {
+                    "--forward"
+                };
+                let value = os_to_string(parser.value()?, flag)?;
+                let forward = PortForward::parse(&value, all_interfaces)?;
                 if forwards
                     .iter()
                     .any(|existing: &PortForward| existing.host_port == forward.host_port)
@@ -825,6 +847,7 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
                         forwards.push(PortForward {
                             host_port: config.host_port,
                             guest_port: 22,
+                            all_interfaces: false,
                         });
                     }
                     break;
