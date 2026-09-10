@@ -38,6 +38,10 @@ pub struct RuntimeRecord {
     pub project_name: String,
     pub project_root: String,
     pub disk_path: String,
+    #[serde(default)]
+    pub main: bool,
+    #[serde(default)]
+    pub main_folders: Vec<String>,
     pub host_port: u16,
     pub guest_port: u16,
     #[serde(default)]
@@ -106,7 +110,12 @@ pub fn acquire_disk_lock(disk_path: &Path) -> Result<FileLock, Box<dyn std::erro
     FileLock::acquire(&lock_path, true).map_err(|err| {
         if err.raw_os_error() == Some(libc::EWOULDBLOCK) || err.raw_os_error() == Some(libc::EAGAIN) {
             if let Some(record) = live_record_for_disk(disk_path) {
-                format!("VM disk is already in use by SSH-managed VM {}. Reconnect with `vibe ssh` or stop it with `vibe ssh --stop {}`.", record.id, record.id).into()
+                let reconnect_command = if record.main {
+                    "vibe ssh --main"
+                } else {
+                    "vibe ssh"
+                };
+                format!("VM disk is already in use by SSH-managed VM {}. Reconnect with `{reconnect_command}` or stop it with `vibe ssh --stop {}`.", record.id, record.id).into()
             } else {
                 format!("VM disk is already in use: {}. Stop the foreground VM before starting another process for this project.", disk_path.display()).into()
             }
@@ -278,12 +287,17 @@ pub fn allocate_port(
 pub fn spawn_supervisor(
     cache_dir: &Path,
     project_root: &Path,
+    main: bool,
     port: u16,
     token: &str,
     forwards: &[PortForward],
 ) -> Result<(String, PathBuf), Box<dyn std::error::Error>> {
     let executable = std::env::current_exe()?;
-    let instance_dir = project_root.join(".vibe");
+    let instance_dir = if main {
+        project_root.to_path_buf()
+    } else {
+        project_root.join(".vibe")
+    };
     create_private_dir(&instance_dir)?;
     let log_path = instance_dir.join("vibe-ssh-supervisor.log");
     let stdout = OpenOptions::new()
@@ -297,6 +311,9 @@ pub fn spawn_supervisor(
         .args(["__ssh-supervisor", "--project-root"])
         .arg(project_root)
         .args(["--host-port", &port.to_string(), "--startup-token", token]);
+    if main {
+        command.arg("--main");
+    }
     for forward in forwards {
         command
             .arg(if forward.all_interfaces {
@@ -397,8 +414,8 @@ pub fn stop_command(cache_dir: &Path, id: &str) -> Result<(), Box<dyn std::error
         thread::sleep(Duration::from_millis(200));
     }
     Err(format!(
-        "Timed out stopping VM {id}; see {}/.vibe/vibe-ssh-supervisor.log",
-        record.project_root
+        "Timed out stopping VM {id}; see {}",
+        supervisor_log_path(&record).display()
     )
     .into())
 }
@@ -435,8 +452,9 @@ pub fn stop_all_command(cache_dir: &Path) -> Result<(), Box<dyn std::error::Erro
     }
     for record in stopping {
         errors.push(format!(
-            "Timed out stopping VM {}; see {}/.vibe/vibe-ssh-supervisor.log",
-            record.id, record.project_root
+            "Timed out stopping VM {}; see {}",
+            record.id,
+            supervisor_log_path(&record).display()
         ));
     }
 
@@ -451,7 +469,8 @@ pub fn stop_all_command(cache_dir: &Path) -> Result<(), Box<dyn std::error::Erro
 pub fn connect_command(
     cache_dir: &Path,
     home: &Path,
-    project_root: &Path,
+    current_dir: &Path,
+    main: bool,
     forwards: &[PortForward],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let identity = home.join(".ssh/vibe_ed25519");
@@ -465,15 +484,28 @@ pub fn connect_command(
     if !Path::new("/usr/bin/ssh").is_file() {
         return Err("Required SSH client not found at /usr/bin/ssh".into());
     }
-    let canonical = project_root.canonicalize()?;
+    let canonical_current_dir = current_dir.canonicalize()?;
+    let target_root = if main {
+        let main_dir = cache_dir.join(super::MAIN_INSTANCE_DIR_NAME);
+        super::ensure_main_folders_file(&main_dir)?;
+        main_dir.canonicalize()?
+    } else {
+        canonical_current_dir.clone()
+    };
     let (record, log_path) = {
         let _lock = acquire_start_lock(cache_dir)?;
         let live = cleanup_and_list(cache_dir)?;
-        if let Some(record) = live
+        let existing = live
             .iter()
-            .find(|r| Path::new(&r.project_root) == canonical)
-            .cloned()
-        {
+            .find(|r| {
+                if main {
+                    r.main
+                } else {
+                    !r.main && Path::new(&r.project_root) == target_root
+                }
+            })
+            .cloned();
+        if let Some(record) = &existing {
             if !forwards.is_empty()
                 && (forwards.len() != record.forwards.len()
                     || forwards
@@ -486,20 +518,43 @@ pub fn connect_command(
                 )
                 .into());
             }
-            (record, canonical.join(".vibe/vibe-ssh-supervisor.log"))
+        }
+        if main && super::ensure_main_folder_entry(&target_root, &canonical_current_dir)? {
+            println!(
+                "Added {} to {}.",
+                canonical_current_dir.display(),
+                target_root.join(super::MAIN_FOLDERS_FILE_NAME).display()
+            );
+            if existing.is_some() {
+                eprintln!(
+                    "The main VM is already running. Stop and restart it to mount the new folder."
+                );
+            }
+        }
+        if let Some(record) = existing {
+            let log_path = supervisor_log_path(&record);
+            (record, log_path)
         } else {
-            let instance_raw = canonical
-                .join(super::INSTANCE_DIR_NAME)
-                .join(super::INSTANCE_DISK_IMAGE_NAME);
+            let instance_dir = if main {
+                target_root.clone()
+            } else {
+                target_root.join(super::INSTANCE_DIR_NAME)
+            };
+            let instance_raw = instance_dir.join(super::INSTANCE_DISK_IMAGE_NAME);
             let default_raw = cache_dir.join(format!("{}.raw", super::DEFAULT_IMAGE_NAME));
             super::ensure_instance_disk(&instance_raw, &default_raw)?;
             let port = allocate_port(&live, forwards)?;
             let token = random_token()?;
-            println!(
-                "Starting SSH VM for {} on 127.0.0.1:{port}...",
-                canonical.display()
-            );
-            let (id, log) = spawn_supervisor(cache_dir, &canonical, port, &token, forwards)?;
+            if main {
+                println!("Starting main SSH VM on 127.0.0.1:{port}...");
+            } else {
+                println!(
+                    "Starting SSH VM for {} on 127.0.0.1:{port}...",
+                    target_root.display()
+                );
+            }
+            let (id, log) =
+                spawn_supervisor(cache_dir, &target_root, main, port, &token, forwards)?;
             let record = cleanup_and_list(cache_dir)?
                 .into_iter()
                 .find(|r| r.id == id)
@@ -544,10 +599,14 @@ pub fn connect_command(
         .into());
     }
     println!("Connected to {} (ID {}).", record.project_name, record.id);
-    let guest_path = format!("/root/{}", record.project_name);
+    let guest_path = if record.main {
+        main_guest_path(&record, &canonical_current_dir)
+    } else {
+        PathBuf::from("/root").join(&record.project_name)
+    };
     let remote = format!(
         "cd '{}' && exec \"${{SHELL:-/bin/bash}}\" -l",
-        guest_path.replace('\'', "'\\''")
+        guest_path.to_string_lossy().replace('\'', "'\\''")
     );
     let status = Command::new("/usr/bin/ssh")
         .args(ssh_common_args(&identity, record.host_port))
@@ -558,6 +617,30 @@ pub fn connect_command(
     } else {
         std::process::exit(status.code().unwrap_or(255))
     }
+}
+
+fn supervisor_log_path(record: &RuntimeRecord) -> PathBuf {
+    let root = PathBuf::from(&record.project_root);
+    if record.main {
+        root.join("vibe-ssh-supervisor.log")
+    } else {
+        root.join(".vibe/vibe-ssh-supervisor.log")
+    }
+}
+
+fn main_guest_path(record: &RuntimeRecord, current_dir: &Path) -> PathBuf {
+    record
+        .main_folders
+        .iter()
+        .map(PathBuf::from)
+        .filter(|folder| current_dir.starts_with(folder))
+        .max_by_key(|folder| folder.components().count())
+        .and_then(|folder| {
+            let name = folder.file_name()?;
+            let relative = current_dir.strip_prefix(&folder).ok()?;
+            Some(PathBuf::from("/root").join(name).join(relative))
+        })
+        .unwrap_or_else(|| PathBuf::from("/root"))
 }
 
 fn ssh_common_args(identity: &Path, port: u16) -> Vec<String> {
@@ -593,6 +676,9 @@ impl SupervisorRuntime {
     pub fn start(
         cache_dir: &Path,
         project_root: &Path,
+        disk_path: &Path,
+        main: bool,
+        main_folders: Vec<String>,
         port: u16,
         token: String,
         forwards: Vec<PortForward>,
@@ -605,11 +691,15 @@ impl SupervisorRuntime {
         let listener = UnixListener::bind(&socket)?;
         fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
         listener.set_nonblocking(true)?;
-        let project_name = project_root
-            .file_name()
-            .ok_or("Project root has no basename")?
-            .to_string_lossy()
-            .into_owned();
+        let project_name = if main {
+            "main".to_string()
+        } else {
+            project_root
+                .file_name()
+                .ok_or("Project root has no basename")?
+                .to_string_lossy()
+                .into_owned()
+        };
         let record = RuntimeRecord {
             schema_version: SCHEMA_VERSION,
             id,
@@ -618,10 +708,9 @@ impl SupervisorRuntime {
             status: "starting".into(),
             project_name,
             project_root: project_root.to_string_lossy().into_owned(),
-            disk_path: project_root
-                .join(".vibe/instance.raw")
-                .to_string_lossy()
-                .into_owned(),
+            disk_path: disk_path.to_string_lossy().into_owned(),
+            main,
+            main_folders,
             host_port: port,
             guest_port: 22,
             forwards,

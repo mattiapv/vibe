@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env,
     ffi::OsString,
     fs,
@@ -55,6 +55,8 @@ const PROVISION_SUCCESS_MARKER: &str = "VIBE_PROVISION_SUCCESS";
 const DEFAULT_IMAGE_NAME: &str = "default";
 const INSTANCE_DIR_NAME: &str = ".vibe";
 const INSTANCE_DISK_IMAGE_NAME: &str = "instance.raw";
+const MAIN_INSTANCE_DIR_NAME: &str = "main";
+const MAIN_FOLDERS_FILE_NAME: &str = "mounted-folders.txt";
 include!(concat!(env!("OUT_DIR"), "/provisioning.rs"));
 
 #[derive(Clone)]
@@ -129,6 +131,125 @@ impl DirectoryShare {
     }
 }
 
+fn ensure_main_folders_file(main_dir: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    ssh_runtime::create_private_dir(main_dir)?;
+    let path = main_dir.join(MAIN_FOLDERS_FILE_NAME);
+    if !path.exists() {
+        fs::write(
+            &path,
+            "# One absolute host folder path per line.\n# vibe ssh --main adds the current folder when needed.\n# Changes apply after the main VM is restarted.\n",
+        )?;
+    }
+    if !path.is_file() {
+        return Err(format!("Main folders path is not a regular file: {}", path.display()).into());
+    }
+    Ok(path)
+}
+
+fn load_main_directory_shares(
+    main_dir: &Path,
+) -> Result<Vec<DirectoryShare>, Box<dyn std::error::Error>> {
+    let path = ensure_main_folders_file(main_dir)?;
+    let content = fs::read_to_string(&path)?;
+    let mut destination_names = HashSet::new();
+    let mut shares = Vec::new();
+
+    for (index, line) in content.lines().enumerate() {
+        let value = line.trim();
+        if value.is_empty() || value.starts_with('#') {
+            continue;
+        }
+        let host = PathBuf::from(value);
+        if !host.is_absolute() {
+            return Err(format!(
+                "{}:{} must contain an absolute folder path: {value}",
+                path.display(),
+                index + 1
+            )
+            .into());
+        }
+        if !host.is_dir() {
+            return Err(format!(
+                "{}:{} folder does not exist: {}",
+                path.display(),
+                index + 1,
+                host.display()
+            )
+            .into());
+        }
+        let host = host.canonicalize()?;
+        let destination_name = host.file_name().ok_or_else(|| {
+            format!(
+                "{}:{} folder has no name and cannot be mounted below /root: {}",
+                path.display(),
+                index + 1,
+                host.display()
+            )
+        })?.to_os_string();
+        if !destination_names.insert(destination_name.clone()) {
+            return Err(format!(
+                "{}:{} duplicate destination /root/{}",
+                path.display(),
+                index + 1,
+                destination_name.to_string_lossy()
+            )
+            .into());
+        }
+        shares.push(DirectoryShare::new(
+            host,
+            PathBuf::from("/root").join(destination_name),
+            false,
+        )?);
+    }
+
+    Ok(shares)
+}
+
+fn ensure_main_folder_entry(
+    main_dir: &Path,
+    current_dir: &Path,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let shares = load_main_directory_shares(main_dir)?;
+    if shares.iter().any(|share| current_dir.starts_with(&share.host)) {
+        return Ok(false);
+    }
+
+    let destination_name = current_dir.file_name().ok_or_else(|| {
+        format!(
+            "Current folder has no name and cannot be mounted below /root: {}",
+            current_dir.display()
+        )
+    })?;
+    if let Some(existing) = shares
+        .iter()
+        .find(|share| share.guest.file_name() == Some(destination_name))
+    {
+        return Err(format!(
+            "Cannot add {}: /root/{} is already used by {}",
+            current_dir.display(),
+            destination_name.to_string_lossy(),
+            existing.host.display()
+        )
+        .into());
+    }
+
+    let current_dir = current_dir.to_str().ok_or_else(|| {
+        format!(
+            "Current folder path is not valid UTF-8: {}",
+            current_dir.display()
+        )
+    })?;
+    let path = ensure_main_folders_file(main_dir)?;
+    let mut content = fs::read_to_string(&path)?;
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str(current_dir);
+    content.push('\n');
+    fs::write(&path, content)?;
+    Ok(true)
+}
+
 fn provisioning_scripts_banner() -> String {
     let mut scripts: Vec<String> = BUILTIN_PROVISION_SCRIPTS
         .iter()
@@ -162,7 +283,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 vibe [OPTIONS] [LOGIN-ACTIONS ...] [path/to/disk.raw]
 vibe provision [PROVISIONING_OPTIONS] [@built-in | path/to/script.sh ...]
-vibe ssh [--forward HOST_PORT:GUEST_PORT | --forward-all HOST_PORT:GUEST_PORT ... | --list | --stop ID|all]
+vibe ssh [--main] [--forward HOST_PORT:GUEST_PORT | --forward-all HOST_PORT:GUEST_PORT ... | --list | --stop ID|all]
 
 Options:
 
@@ -199,8 +320,9 @@ Provisioning creates a new named image by running (built-in) scripts. Options:
 
 Commands
 
-  ssh [--forward HOST_PORT:GUEST_PORT | --forward-all HOST_PORT:GUEST_PORT ...]
+  ssh [--main] [--forward HOST_PORT:GUEST_PORT | --forward-all HOST_PORT:GUEST_PORT ...]
                                                             Start or reconnect to a persistent VM over SSH, with optional extra port forwards.
+  ssh --main                                                Start or reconnect to the shared main VM.
   ssh --list                                                List currently running SSH-managed VMs.
   ssh --stop ID                                             Gracefully stop one SSH-managed VM.
   ssh --stop all                                            Gracefully stop all SSH-managed VMs.
@@ -216,13 +338,19 @@ Commands
     let cache_dir = cache_home.join("vibe");
     if let CliCommand::Ssh(command) = &args.command {
         return match command {
-            SshCommand::Connect(forwards) => {
+            SshCommand::Connect { main, forwards } => {
                 if !image_path(&cache_dir, DEFAULT_IMAGE_NAME).exists() {
                     return Err("vibe ssh requires a provisioned default image. Run `vibe` first, wait for provisioning to finish, then exit the VM and run `vibe ssh` again.".into());
                 }
                 require_vibe_ssh_identity(&home)?;
                 ensure_signed();
-                ssh_runtime::connect_command(&cache_dir, &home, &env::current_dir()?, forwards)
+                ssh_runtime::connect_command(
+                    &cache_dir,
+                    &home,
+                    &env::current_dir()?,
+                    *main,
+                    forwards,
+                )
             }
             SshCommand::List => ssh_runtime::list_command(&cache_dir),
             SshCommand::Stop(id) => ssh_runtime::stop_command(&cache_dir, id),
@@ -294,19 +422,28 @@ Commands
             image,
             supervisor,
         } => {
+            let main_instance = supervisor.as_ref().is_some_and(|config| config.main);
             let project_root = match &supervisor {
                 Some(config) => config.project_root.clone(),
                 None => env::current_dir()?.canonicalize()?,
             };
-            let project_name = project_root
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .into_owned();
+            let project_name = if main_instance {
+                MAIN_INSTANCE_DIR_NAME.to_string()
+            } else {
+                project_root
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            };
 
-            let instance_dir = project_root.join(INSTANCE_DIR_NAME);
+            let instance_dir = if main_instance {
+                project_root.clone()
+            } else {
+                project_root.join(INSTANCE_DIR_NAME)
+            };
             let instance_raw = instance_dir.join(INSTANCE_DISK_IMAGE_NAME);
-            // Only persist the networking log for the managed instance disk in `.vibe/`.
+            // Only persist the networking log for a managed instance disk.
             // For external `--disk` there's no natural per-instance directory to write to, so skip logging.
             let log_to_instance = disk.is_none();
             let disk_path = if let Some(path) = disk {
@@ -342,27 +479,49 @@ Commands
 
             let mut login_actions = Vec::new();
             let mut directory_shares = Vec::new();
+            let main_directory_shares = if main_instance {
+                load_main_directory_shares(&instance_dir)?
+            } else {
+                Vec::new()
+            };
 
             if !args.no_default_mounts {
-                login_actions.push(Send(format!(" cd '{}'", shell_single_quote(&project_name))));
-
-                // Discourage read/write of project dir subfolders within the VM.
-                // Note that this isn't secure, since the VM runs as root and could unmount this.
-                // I couldn't find an alternative way to do this --- the MacOS sandbox doesn't apply to the Apple Virtualization system =(
-                for subfolder in [".git", INSTANCE_DIR_NAME] {
-                    if project_root.join(subfolder).exists() {
-                        login_actions.push(Send(format!(r" mount -t tmpfs tmpfs {subfolder}")));
+                if main_instance {
+                    for share in &main_directory_shares {
+                        // Discourage read/write of project dir subfolders within the VM.
+                        // Note that this isn't secure, since the VM runs as root and could unmount this.
+                        // I couldn't find an alternative way to do this --- the MacOS sandbox doesn't apply to the Apple Virtualization system =(
+                        for subfolder in [".git", INSTANCE_DIR_NAME] {
+                            let hidden_host_path = share.host.join(subfolder);
+                            if hidden_host_path.exists() {
+                                let hidden_guest_path = share.guest.join(subfolder);
+                                login_actions.push(Send(format!(
+                                    " mount -t tmpfs tmpfs '{}'",
+                                    shell_single_quote(&hidden_guest_path.to_string_lossy())
+                                )));
+                            }
+                        }
                     }
-                }
+                    directory_shares.extend(main_directory_shares.iter().cloned());
+                } else {
+                    login_actions
+                        .push(Send(format!(" cd '{}'", shell_single_quote(&project_name))));
 
-                directory_shares.push(
-                    DirectoryShare::new(
+                    // Discourage read/write of project dir subfolders within the VM.
+                    // Note that this isn't secure, since the VM runs as root and could unmount this.
+                    // I couldn't find an alternative way to do this --- the MacOS sandbox doesn't apply to the Apple Virtualization system =(
+                    for subfolder in [".git", INSTANCE_DIR_NAME] {
+                        if project_root.join(subfolder).exists() {
+                            login_actions.push(Send(format!(r" mount -t tmpfs tmpfs {subfolder}")));
+                        }
+                    }
+
+                    directory_shares.push(DirectoryShare::new(
                         project_root.clone(),
                         PathBuf::from("/root/").join(project_name),
                         false,
-                    )
-                    .expect("Project directory must exist"),
-                );
+                    )?);
+                }
 
                 directory_shares.push(mise_directory_share);
                 // Activate mise if applicable.
@@ -419,6 +578,12 @@ Commands
                 let runtime = ssh_runtime::SupervisorRuntime::start(
                     &cache_dir,
                     &project_root,
+                    &disk_path,
+                    main_instance,
+                    main_directory_shares
+                        .iter()
+                        .map(|share| share.host.to_string_lossy().into_owned())
+                        .collect(),
                     config.host_port,
                     config.startup_token.clone(),
                     config.forwards.clone(),
@@ -497,7 +662,10 @@ enum CliCommand {
 }
 
 enum SshCommand {
-    Connect(Vec<PortForward>),
+    Connect {
+        main: bool,
+        forwards: Vec<PortForward>,
+    },
     List,
     Stop(String),
     StopAll,
@@ -505,6 +673,7 @@ enum SshCommand {
 
 struct SupervisorArgs {
     project_root: PathBuf,
+    main: bool,
     host_port: u16,
     startup_token: String,
     forwards: Vec<PortForward>,
@@ -609,11 +778,14 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
     fn parse_ssh_command(
         parser: &mut lexopt::Parser,
     ) -> Result<CliCommand, Box<dyn std::error::Error>> {
-        let mut command = SshCommand::Connect(Vec::new());
+        let mut command = SshCommand::Connect {
+            main: false,
+            forwards: Vec::new(),
+        };
         while let Some(arg) = parser.next()? {
             match arg {
                 option @ (Long("forward") | Long("forward-all"))
-                    if matches!(command, SshCommand::Connect(_)) =>
+                    if matches!(command, SshCommand::Connect { .. }) =>
                 {
                     let all_interfaces = matches!(option, Long("forward-all"));
                     let flag = if all_interfaces {
@@ -623,7 +795,7 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
                     };
                     let value = os_to_string(parser.value()?, flag)?;
                     let forward = PortForward::parse(&value, all_interfaces)?;
-                    let SshCommand::Connect(forwards) = &mut command else {
+                    let SshCommand::Connect { forwards, .. } = &mut command else {
                         unreachable!()
                     };
                     if forwards
@@ -638,10 +810,19 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
                     }
                     forwards.push(forward);
                 }
-                Long("list") if matches!(&command, SshCommand::Connect(forwards) if forwards.is_empty()) => {
+                Long("main") if matches!(&command, SshCommand::Connect { main: false, .. }) => {
+                    let SshCommand::Connect { main, .. } = &mut command else {
+                        unreachable!()
+                    };
+                    *main = true;
+                }
+                Long("main") if matches!(command, SshCommand::Connect { .. }) => {
+                    return Err("Duplicate --main".into());
+                }
+                Long("list") if matches!(&command, SshCommand::Connect { main: false, forwards } if forwards.is_empty()) => {
                     command = SshCommand::List
                 }
-                Long("stop") if matches!(&command, SshCommand::Connect(forwards) if forwards.is_empty()) =>
+                Long("stop") if matches!(&command, SshCommand::Connect { main: false, forwards } if forwards.is_empty()) =>
                 {
                     let id = os_to_string(parser.value()?, "--stop")?;
                     if id == "all" {
@@ -656,9 +837,10 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
                         command = SshCommand::Stop(id);
                     }
                 }
-                Long("list") | Long("stop") if matches!(command, SshCommand::Connect(_)) => {
+                Long("list") | Long("stop") if matches!(command, SshCommand::Connect { .. }) => {
                     return Err(
-                        "vibe ssh --forward cannot be combined with --list or --stop".into(),
+                        "vibe ssh --main or --forward cannot be combined with --list or --stop"
+                            .into(),
                     );
                 }
                 Long("list") | Long("stop") => {
@@ -680,12 +862,14 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
         parser: &mut lexopt::Parser,
     ) -> Result<CliCommand, Box<dyn std::error::Error>> {
         let mut project_root = None;
+        let mut main = false;
         let mut host_port = None;
         let mut startup_token = None;
         let mut forwards = Vec::new();
         while let Some(arg) = parser.next()? {
             match arg {
                 Long("project-root") => project_root = Some(PathBuf::from(parser.value()?)),
+                Long("main") => main = true,
                 Long("host-port") => {
                     host_port = Some(os_to_string(parser.value()?, "--host-port")?.parse::<u16>()?)
                 }
@@ -730,6 +914,7 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 project_root: project_root
                     .ok_or("Missing internal --project-root")?
                     .canonicalize()?,
+                main,
                 host_port,
                 startup_token: startup_token.ok_or("Missing internal --startup-token")?,
                 forwards,
