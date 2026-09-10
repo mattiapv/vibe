@@ -95,7 +95,7 @@ The disk state persists until you delete it.
 
 For a persistent, reconnectable VM, use SSH mode:
 
-vibe ssh [--forward HOST_PORT:GUEST_PORT | --forward-all HOST_PORT:GUEST_PORT ...]
+vibe ssh [--main] [--forward HOST_PORT:GUEST_PORT | --forward-all HOST_PORT:GUEST_PORT ...]
 
 `vibe ssh` requires an existing `~/.cache/vibe/default.raw`. On a new
 installation, run `vibe` first, wait for provisioning to finish, then exit the
@@ -106,6 +106,28 @@ the host `/usr/bin/ssh` client. Logging out, pressing Ctrl-D, losing the
 connection, or closing the terminal leaves the VM running. Running `vibe ssh`
 again from the same canonical project folder reconnects to that VM. Different
 projects receive separate loopback ports starting at 2222.
+
+Use `vibe ssh --main` to start or reconnect to one project-independent VM. Its
+disk and logs are stored in `~/.cache/vibe/main/`, and it does not create a
+`.vibe` directory in the current folder. On first use, Vibe creates
+`~/.cache/vibe/main/mounted-folders.txt` and adds the canonical current folder.
+Each absolute host folder path in the file is mounted read-write at
+`/root/FOLDER_NAME`; blank lines and lines starting with `#` are ignored. Paths
+must exist, and two paths with the same folder name are rejected because they
+would have the same guest destination.
+
+Each `vibe ssh --main` invocation adds the canonical current folder when it is
+not already covered by a listed parent folder. If the main VM is stopped, the
+new folder is mounted during startup. If it is already running, the entry is
+saved for the next boot and Vibe reports that the VM must be stopped and
+restarted before the folder becomes available. The running VM is never
+restarted automatically.
+
+When `vibe ssh --main` is invoked from a listed folder or one of its
+descendants, the SSH shell starts at the corresponding path below
+`/root/FOLDER_NAME`. Otherwise, it starts in `/root`. If listed folders are
+nested, the most specific matching folder is used. Any `.vibe` directory in a
+listed folder is masked inside the VM.
 
 Add repeatable TCP forwards alongside SSH. `--forward` binds only to `127.0.0.1`; `--forward-all` binds to `0.0.0.0`:
 
@@ -160,7 +182,7 @@ If you don't want this, you can make your own `.raw` disk images and copy them i
 ```
 vibe [OPTIONS] [LOGIN-ACTIONS ...] [path/to/disk.raw]
 vibe provision [PROVISIONING_OPTIONS] [@built-in | path/to/script.sh ...]
-vibe ssh [--forward HOST_PORT:GUEST_PORT ... | --list | --stop ID|all]
+vibe ssh [--main] [--forward HOST_PORT:GUEST_PORT ... | --list | --stop ID|all]
 
 Options:
 
