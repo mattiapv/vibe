@@ -1,1 +1,3 @@
 /target
+/macos-menubar/build/
+/macos-menubar/VibeMenuBarConfig.local.swift
