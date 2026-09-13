@@ -283,7 +283,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 vibe [OPTIONS] [LOGIN-ACTIONS ...] [path/to/disk.raw]
 vibe provision [PROVISIONING_OPTIONS] [@built-in | path/to/script.sh ...]
-vibe ssh [--main] [--forward HOST_PORT:GUEST_PORT | --forward-all HOST_PORT:GUEST_PORT ... | --list | --stop ID|all]
+vibe ssh [--main [--no-mount]] [--forward HOST_PORT:GUEST_PORT | --forward-all HOST_PORT:GUEST_PORT ... | --list | --stop ID|all]
 
 Options:
 
@@ -320,9 +320,10 @@ Provisioning creates a new named image by running (built-in) scripts. Options:
 
 Commands
 
-  ssh [--main] [--forward HOST_PORT:GUEST_PORT | --forward-all HOST_PORT:GUEST_PORT ...]
+  ssh [--main [--no-mount]] [--forward HOST_PORT:GUEST_PORT | --forward-all HOST_PORT:GUEST_PORT ...]
                                                             Start or reconnect to a persistent VM over SSH, with optional extra port forwards.
   ssh --main                                                Start or reconnect to the shared main VM.
+  ssh --main --no-mount                                     Start or reconnect to the shared main VM without adding the current folder as a mount.
   ssh --list                                                List currently running SSH-managed VMs.
   ssh --stop ID                                             Gracefully stop one SSH-managed VM.
   ssh --stop all                                            Gracefully stop all SSH-managed VMs.
@@ -338,7 +339,11 @@ Commands
     let cache_dir = cache_home.join("vibe");
     if let CliCommand::Ssh(command) = &args.command {
         return match command {
-            SshCommand::Connect { main, forwards } => {
+            SshCommand::Connect {
+                main,
+                no_mount,
+                forwards,
+            } => {
                 if !image_path(&cache_dir, DEFAULT_IMAGE_NAME).exists() {
                     return Err("vibe ssh requires a provisioned default image. Run `vibe` first, wait for provisioning to finish, then exit the VM and run `vibe ssh` again.".into());
                 }
@@ -349,6 +354,7 @@ Commands
                     &home,
                     &env::current_dir()?,
                     *main,
+                    *no_mount,
                     forwards,
                 )
             }
@@ -664,6 +670,7 @@ enum CliCommand {
 enum SshCommand {
     Connect {
         main: bool,
+        no_mount: bool,
         forwards: Vec<PortForward>,
     },
     List,
@@ -780,6 +787,7 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
     ) -> Result<CliCommand, Box<dyn std::error::Error>> {
         let mut command = SshCommand::Connect {
             main: false,
+            no_mount: false,
             forwards: Vec::new(),
         };
         while let Some(arg) = parser.next()? {
@@ -819,10 +827,19 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
                 Long("main") if matches!(command, SshCommand::Connect { .. }) => {
                     return Err("Duplicate --main".into());
                 }
-                Long("list") if matches!(&command, SshCommand::Connect { main: false, forwards } if forwards.is_empty()) => {
+                Long("no-mount") if matches!(&command, SshCommand::Connect { no_mount: false, .. }) => {
+                    let SshCommand::Connect { no_mount, .. } = &mut command else {
+                        unreachable!()
+                    };
+                    *no_mount = true;
+                }
+                Long("no-mount") if matches!(command, SshCommand::Connect { .. }) => {
+                    return Err("Duplicate --no-mount".into());
+                }
+                Long("list") if matches!(&command, SshCommand::Connect { main: false, no_mount: false, forwards } if forwards.is_empty()) => {
                     command = SshCommand::List
                 }
-                Long("stop") if matches!(&command, SshCommand::Connect { main: false, forwards } if forwards.is_empty()) =>
+                Long("stop") if matches!(&command, SshCommand::Connect { main: false, no_mount: false, forwards } if forwards.is_empty()) =>
                 {
                     let id = os_to_string(parser.value()?, "--stop")?;
                     if id == "all" {
@@ -854,6 +871,9 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
                     .into());
                 }
             }
+        }
+        if matches!(&command, SshCommand::Connect { main: false, no_mount: true, .. }) {
+            return Err("--no-mount requires --main".into());
         }
         Ok(CliCommand::Ssh(command))
     }

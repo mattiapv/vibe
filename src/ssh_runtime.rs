@@ -471,6 +471,7 @@ pub fn connect_command(
     home: &Path,
     current_dir: &Path,
     main: bool,
+    no_mount: bool,
     forwards: &[PortForward],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let identity = home.join(".ssh/vibe_ed25519");
@@ -519,7 +520,7 @@ pub fn connect_command(
                 .into());
             }
         }
-        if main && super::ensure_main_folder_entry(&target_root, &canonical_current_dir)? {
+        if main && !no_mount && super::ensure_main_folder_entry(&target_root, &canonical_current_dir)? {
             println!(
                 "Added {} to {}.",
                 canonical_current_dir.display(),
