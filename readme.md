@@ -95,7 +95,7 @@ The disk state persists until you delete it.
 
 For a persistent, reconnectable VM, use SSH mode:
 
-vibe ssh [--main] [--forward HOST_PORT:GUEST_PORT | --forward-all HOST_PORT:GUEST_PORT ...]
+vibe ssh [--main [--no-mount]] [--forward HOST_PORT:GUEST_PORT | --forward-all HOST_PORT:GUEST_PORT ...]
 
 `vibe ssh` requires an existing `~/.cache/vibe/default.raw`. On a new
 installation, run `vibe` first, wait for provisioning to finish, then exit the
@@ -122,6 +122,10 @@ new folder is mounted during startup. If it is already running, the entry is
 saved for the next boot and Vibe reports that the VM must be stopped and
 restarted before the folder becomes available. The running VM is never
 restarted automatically.
+
+Use `vibe ssh --main --no-mount` to start or reconnect without adding the
+current folder to `mounted-folders.txt`. This is useful for launch agents and
+menu bar apps that should leave the existing mounts unchanged.
 
 When `vibe ssh --main` is invoked from a listed folder or one of its
 descendants, the SSH shell starts at the corresponding path below
@@ -182,7 +186,7 @@ If you don't want this, you can make your own `.raw` disk images and copy them i
 ```
 vibe [OPTIONS] [LOGIN-ACTIONS ...] [path/to/disk.raw]
 vibe provision [PROVISIONING_OPTIONS] [@built-in | path/to/script.sh ...]
-vibe ssh [--main] [--forward HOST_PORT:GUEST_PORT ... | --list | --stop ID|all]
+vibe ssh [--main [--no-mount]] [--forward HOST_PORT:GUEST_PORT ... | --list | --stop ID|all]
 
 Options:
 
