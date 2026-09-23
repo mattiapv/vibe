@@ -105,8 +105,12 @@ pub fn acquire_disk_lock(disk_path: &Path) -> Result<FileLock, Box<dyn std::erro
     let lock_path = disk_path.with_file_name(format!("{name}.lock"));
     FileLock::acquire(&lock_path, true).map_err(|err| {
         if err.raw_os_error() == Some(libc::EWOULDBLOCK) || err.raw_os_error() == Some(libc::EAGAIN) {
-            if let Some(record) = live_record_for_disk(disk_path) {
-                format!("VM disk is already in use by SSH-managed VM {}. Reconnect with `vibe ssh` or stop it with `vibe ssh --stop {}`.", record.id, record.id).into()
+            if let Some(record) = record_for_disk(disk_path) {
+                if is_live(&record) {
+                    format!("VM disk is already in use by SSH-managed VM {}. Reconnect with `vibe ssh` or stop it with `vibe ssh --stop {}`.", record.id, record.id).into()
+                } else {
+                    format!("SSH-managed VM {} still holds its disk, but its supervisor is not responding. Wait a moment and retry `vibe ssh`.", record.id).into()
+                }
             } else {
                 format!("VM disk is already in use: {}. Stop the foreground VM before starting another process for this project.", disk_path.display()).into()
             }
@@ -114,7 +118,7 @@ pub fn acquire_disk_lock(disk_path: &Path) -> Result<FileLock, Box<dyn std::erro
     })
 }
 
-fn live_record_for_disk(disk_path: &Path) -> Option<RuntimeRecord> {
+fn record_for_disk(disk_path: &Path) -> Option<RuntimeRecord> {
     let home = std::env::var_os("HOME").map(PathBuf::from)?;
     let cache = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
@@ -122,7 +126,25 @@ fn live_record_for_disk(disk_path: &Path) -> Option<RuntimeRecord> {
         .join("vibe");
     read_records(&cache)
         .into_iter()
-        .find(|record| Path::new(&record.disk_path) == disk_path && is_live(record))
+        .find(|record| Path::new(&record.disk_path) == disk_path)
+}
+
+fn disk_lock_is_held(disk_path: &Path) -> io::Result<bool> {
+    let name = disk_path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Disk path has no file name"))?
+        .to_string_lossy();
+    let lock_path = disk_path.with_file_name(format!("{name}.lock"));
+    match FileLock::acquire(&lock_path, true) {
+        Ok(_) => Ok(false),
+        Err(err)
+            if err.raw_os_error() == Some(libc::EWOULDBLOCK)
+                || err.raw_os_error() == Some(libc::EAGAIN) =>
+        {
+            Ok(true)
+        }
+        Err(err) => Err(err),
+    }
 }
 
 pub fn running_dir(cache_dir: &Path) -> PathBuf {
@@ -214,6 +236,18 @@ fn is_live(record: &RuntimeRecord) -> bool {
     })
 }
 
+fn is_live_after_wake(record: &RuntimeRecord) -> bool {
+    for attempt in 0..3 {
+        if is_live(record) {
+            return true;
+        }
+        if attempt < 2 {
+            thread::sleep(Duration::from_millis(200));
+        }
+    }
+    false
+}
+
 pub fn cleanup_and_list(
     cache_dir: &Path,
 ) -> Result<Vec<RuntimeRecord>, Box<dyn std::error::Error>> {
@@ -221,7 +255,11 @@ pub fn cleanup_and_list(
     let mut live = Vec::new();
     let records = read_records(cache_dir);
     for record in records {
-        if is_live(&record) {
+        if is_live_after_wake(&record) {
+            live.push(record);
+        } else if disk_lock_is_held(Path::new(&record.disk_path))? {
+            let mut record = record;
+            record.status = "unresponsive".into();
             live.push(record);
         } else {
             let _ = fs::remove_file(record_path(cache_dir, &record.id));
@@ -383,6 +421,9 @@ pub fn stop_command(cache_dir: &Path, id: &str) -> Result<(), Box<dyn std::error
         .into_iter()
         .find(|r| r.id == id)
         .ok_or_else(|| format!("No running SSH-managed VM with ID {id}"))?;
+    if record.status == "unresponsive" {
+        return Err(format!("SSH-managed VM {id} still holds its disk, but its supervisor is not responding. Wait a moment and retry `vibe ssh --stop {id}`.").into());
+    }
     println!("Stopping {} ({})...", record.project_name, record.id);
     let response = request(&record, "stop")?;
     if !response.ok {
@@ -474,6 +515,9 @@ pub fn connect_command(
             .find(|r| Path::new(&r.project_root) == canonical)
             .cloned()
         {
+            if record.status == "unresponsive" {
+                return Err(format!("SSH-managed VM {} still holds its disk, but its supervisor is not responding. Wait a moment and retry `vibe ssh`.", record.id).into());
+            }
             if !forwards.is_empty()
                 && (forwards.len() != record.forwards.len()
                     || forwards
