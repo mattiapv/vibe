@@ -297,7 +297,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 vibe [OPTIONS] [LOGIN-ACTIONS ...] [path/to/disk.raw]
 vibe provision [PROVISIONING_OPTIONS] [@built-in | path/to/script.sh ...]
 vibe ssh [--main [--no-mount]] [--forward HOST_PORT:GUEST_PORT | --forward-all HOST_PORT:GUEST_PORT ... | --list | --stop ID|all]
-vibe ls
+vibe ls [--delete-folder PATH]
 
 Options:
 
@@ -343,6 +343,7 @@ Commands
   ssh --stop all                                            Gracefully stop all SSH-managed VMs.
   ls                                                        List tracked VMs from ~/.cache/vibe/vm_registry.json
                                                             and optionally delete selected entries and .vibe folders.
+  ls --delete-folder PATH                                   Delete the tracked VM for PATH without prompting.
 
 {}",
                  provisioning_scripts_banner()
@@ -380,8 +381,8 @@ Commands
         };
     }
 
-    if matches!(&args.command, CliCommand::List) {
-        return run_vm_registry_ls(&cache_dir);
+    if let CliCommand::List { delete_folder } = &args.command {
+        return run_vm_registry_ls(&cache_dir, delete_folder.as_deref());
     }
     let guest_mise_cache = cache_dir.join(".guest-mise-cache");
     let guest_mise_config = cache_dir.join(".guest-mise-config");
@@ -455,7 +456,7 @@ Commands
                 &ssh_public_key,
             )
         }
-        CliCommand::List => unreachable!(),
+        CliCommand::List { .. } => unreachable!(),
         CliCommand::Run {
             disk,
             image,
@@ -698,7 +699,9 @@ struct CliArgs {
 
 enum CliCommand {
     Ssh(SshCommand),
-    List,
+    List {
+        delete_folder: Option<String>,
+    },
     Run {
         disk: Option<PathBuf>,
         image: String,
@@ -1024,6 +1027,14 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
         match arg {
             Long("version") => version = true,
             Long("help") | Short('h') => help = true,
+            Long("delete-folder") if matches!(command.as_ref(), Some(CliCommand::List { .. })) => {
+                let folder = os_to_string(parser.value()?, "--delete-folder")?;
+                if let Some(CliCommand::List { delete_folder }) = command.as_mut() {
+                    if delete_folder.replace(folder).is_some() {
+                        return Err("Duplicate --delete-folder".into());
+                    }
+                }
+            }
             Long("image") => {
                 if image_seen {
                     return Err("Duplicate --image".into());
@@ -1124,10 +1135,12 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
                     break;
                 }
                 if disk.is_none() && command.is_none() && value == "ls" {
-                    command = Some(CliCommand::List);
+                    command = Some(CliCommand::List {
+                        delete_folder: None,
+                    });
                     continue;
                 }
-                if matches!(command.as_ref(), Some(CliCommand::List)) {
+                if matches!(command.as_ref(), Some(CliCommand::List { .. })) {
                     return Err("Disk path cannot be provided with command 'ls'".into());
                 }
                 if disk.is_some() {
@@ -1163,7 +1176,7 @@ fn parse_cli() -> Result<CliArgs, Box<dyn std::error::Error>> {
         );
     }
 
-    if matches!(command.as_ref(), Some(CliCommand::List))
+    if matches!(command.as_ref(), Some(CliCommand::List { .. }))
         && (image_seen
             || no_default_mounts
             || !env_vars.is_empty()
@@ -1206,9 +1219,20 @@ fn env_login_actions(env: &HashMap<String, String>) -> Vec<LoginAction> {
         .collect()
 }
 
-fn run_vm_registry_ls(cache_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn run_vm_registry_ls(
+    cache_dir: &Path,
+    delete_folder: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all(cache_dir)?;
     let records = vm_registry::list_vm_records(cache_dir)?;
+
+    if let Some(folder) = delete_folder {
+        let record = records
+            .iter()
+            .find(|record| record.folder_path == folder)
+            .ok_or_else(|| format!("No tracked VM for folder: {folder}"))?;
+        return delete_vm_records(cache_dir, &[record.clone()]);
+    }
 
     if records.is_empty() {
         println!("No tracked VMs in {}.", cache_dir.display());
@@ -1244,9 +1268,19 @@ fn run_vm_registry_ls(cache_dir: &Path) -> Result<(), Box<dyn std::error::Error>
         parse_selection_indexes(input, records.len())?
     };
 
-    let mut deleted_folders = Vec::with_capacity(selected.len());
-    for idx in selected {
-        let record = &records[idx];
+    let selected_records = selected
+        .into_iter()
+        .map(|idx| records[idx].clone())
+        .collect::<Vec<_>>();
+    delete_vm_records(cache_dir, &selected_records)
+}
+
+fn delete_vm_records(
+    cache_dir: &Path,
+    records: &[vm_registry::VmRecord],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut deleted_folders = Vec::with_capacity(records.len());
+    for record in records {
         let project_dir = PathBuf::from(&record.folder_path);
         let vibe_dir = project_dir.join(".vibe");
         let instance_raw = vibe_dir.join("instance.raw");

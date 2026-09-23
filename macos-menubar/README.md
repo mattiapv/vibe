@@ -27,4 +27,8 @@ after that command exits.
 Open Settings to manage the folders in `~/.cache/vibe/main/mounted-folders.txt`.
 Restart Vibe after saving for mount changes to apply.
 
+The Saved VMs tab lists tracked project VMs from `vm_registry.json`. Select a VM
+to delete its tracked entry and `.vibe` folder using `vibe ls --delete-folder`.
+VMs with disks in use are kept.
+
 On macOS 13 or later, Settings also provides an Open Vibe at login toggle.

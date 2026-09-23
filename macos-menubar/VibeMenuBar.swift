@@ -104,6 +104,7 @@ final class VibeMenuBarDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openSettings() {
         if let settingsWindowController {
+            settingsWindowController.loadVMs()
             NSApp.activate(ignoringOtherApps: true)
             settingsWindowController.showWindow(nil)
             settingsWindowController.window?.makeKeyAndOrderFront(nil)

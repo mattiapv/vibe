@@ -6,23 +6,39 @@ final class VibeSettingsWindowController: NSWindowController, NSTableViewDataSou
     private let tableView = NSTableView()
     private let statusLabel = NSTextField(labelWithString: "")
     private let openAtLoginCheckbox = NSButton(checkboxWithTitle: "Open Vibe at login", target: nil, action: nil)
+    private let vmTableView = NSTableView()
+    private let vmStatusLabel = NSTextField(labelWithString: "")
+    private let deleteVMButton = NSButton(title: "Delete VM…", target: nil, action: nil)
     private var folders: [String] = []
     private var comments: [String] = []
+    private var vmRecords: [VMRecord] = []
+    private var deletingVM = false
+
+    private struct VMRecord: Decodable {
+        let folder_path: String
+        let created_at: String
+    }
+
+    private struct VMRegistry: Decodable {
+        let vm_folders: [VMRecord]
+    }
 
     init() {
         let contentView = NSView()
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 620, height: 380),
+            contentRect: NSRect(x: 0, y: 0, width: 780, height: 500),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = "Vibe Settings"
+        window.contentMinSize = NSSize(width: 680, height: 460)
         window.contentView = contentView
         super.init(window: window)
 
         configureContent(in: contentView)
         loadFolders()
+        loadVMs()
         refreshOpenAtLoginStatus()
         window.center()
     }
@@ -32,6 +48,32 @@ final class VibeSettingsWindowController: NSWindowController, NSTableViewDataSou
     }
 
     private func configureContent(in contentView: NSView) {
+        let tabs = NSTabView()
+        tabs.translatesAutoresizingMaskIntoConstraints = false
+        let foldersTab = NSTabViewItem(identifier: "folders")
+        foldersTab.label = "Mounted Folders"
+        let foldersView = NSView()
+        foldersTab.view = foldersView
+        configureFolders(in: foldersView)
+        tabs.addTabViewItem(foldersTab)
+
+        let vmsTab = NSTabViewItem(identifier: "vms")
+        vmsTab.label = "Saved VMs"
+        let vmsView = NSView()
+        vmsTab.view = vmsView
+        configureVMs(in: vmsView)
+        tabs.addTabViewItem(vmsTab)
+
+        contentView.addSubview(tabs)
+        NSLayoutConstraint.activate([
+            tabs.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 12),
+            tabs.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
+            tabs.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12),
+            tabs.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -12),
+        ])
+    }
+
+    private func configureFolders(in contentView: NSView) {
         let descriptionLabel = NSTextField(wrappingLabelWithString: "Folders mounted in the Vibe main VM")
         descriptionLabel.font = .systemFont(ofSize: 16, weight: .semibold)
 
@@ -78,6 +120,129 @@ final class VibeSettingsWindowController: NSWindowController, NSTableViewDataSou
             stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -20),
             scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 180),
         ])
+    }
+
+    private func configureVMs(in contentView: NSView) {
+        let descriptionLabel = NSTextField(wrappingLabelWithString: "VMs tracked by vibe ls")
+        descriptionLabel.font = .systemFont(ofSize: 16, weight: .semibold)
+
+        let dateColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("createdAt"))
+        dateColumn.title = "Created"
+        dateColumn.width = 105
+        vmTableView.addTableColumn(dateColumn)
+        let folderColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("vmFolder"))
+        folderColumn.title = "Project folder"
+        folderColumn.resizingMask = .autoresizingMask
+        vmTableView.addTableColumn(folderColumn)
+        vmTableView.delegate = self
+        vmTableView.dataSource = self
+        vmTableView.usesAlternatingRowBackgroundColors = true
+
+        let scrollView = NSScrollView()
+        scrollView.documentView = vmTableView
+        scrollView.hasVerticalScroller = true
+        scrollView.borderType = .bezelBorder
+
+        deleteVMButton.target = self
+        deleteVMButton.action = #selector(deleteSelectedVM)
+        deleteVMButton.isEnabled = false
+        let reloadButton = NSButton(title: "Reload", target: self, action: #selector(loadVMs))
+        let buttonRow = NSStackView(views: [deleteVMButton, NSView(), reloadButton])
+        buttonRow.orientation = .horizontal
+        buttonRow.spacing = 8
+        buttonRow.setHuggingPriority(.defaultLow, for: .horizontal)
+
+        vmStatusLabel.textColor = .secondaryLabelColor
+        vmStatusLabel.lineBreakMode = .byTruncatingMiddle
+        let stack = NSStackView(views: [descriptionLabel, scrollView, buttonRow, vmStatusLabel])
+        stack.orientation = .vertical
+        stack.spacing = 12
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+            stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
+            stack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12),
+            stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -20),
+            scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 180),
+        ])
+    }
+
+    @objc func loadVMs() {
+        do {
+            let data = try Data(contentsOf: vmRegistryURL)
+            if String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                vmRecords = []
+            } else {
+                vmRecords = try JSONDecoder().decode(VMRegistry.self, from: data).vm_folders
+            }
+            vmRecords.sort {
+                $0.created_at == $1.created_at
+                    ? $0.folder_path < $1.folder_path
+                    : $0.created_at > $1.created_at
+            }
+            vmTableView.reloadData()
+            deleteVMButton.isEnabled = !deletingVM && vmRecords.indices.contains(vmTableView.selectedRow)
+            vmStatusLabel.stringValue = vmRecords.isEmpty ? "No tracked VMs." : "Loaded \(vmRecords.count) VM(s)."
+        } catch CocoaError.fileReadNoSuchFile {
+            vmRecords = []
+            vmTableView.reloadData()
+            deleteVMButton.isEnabled = false
+            vmStatusLabel.stringValue = "No tracked VMs."
+        } catch {
+            vmRecords = []
+            vmTableView.reloadData()
+            deleteVMButton.isEnabled = false
+            vmStatusLabel.stringValue = "Could not load VMs: \(error.localizedDescription)"
+        }
+    }
+
+    @objc private func deleteSelectedVM() {
+        let row = vmTableView.selectedRow
+        guard !deletingVM, vmRecords.indices.contains(row) else { return }
+        let record = vmRecords[row]
+        let alert = NSAlert()
+        alert.messageText = "Delete saved VM?"
+        alert.informativeText = "This removes the tracked entry and deletes the .vibe folder in:\n\(record.folder_path)\n\nThe project folder itself is kept."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Delete VM")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        deletingVM = true
+        deleteVMButton.isEnabled = false
+        vmStatusLabel.stringValue = "Deleting VM…"
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: VibeMenuBarConfig.executablePath)
+            process.arguments = ["ls", "--delete-folder", record.folder_path]
+            process.standardInput = FileHandle.nullDevice
+            let output = Pipe()
+            process.standardOutput = output
+            process.standardError = output
+            do {
+                try process.run()
+                let data = output.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                let message = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+                DispatchQueue.main.async {
+                    self?.deletingVM = false
+                    self?.loadVMs()
+                    self?.vmStatusLabel.stringValue = message.isEmpty
+                        ? "VM command exited with status \(process.terminationStatus)."
+                        : message.replacingOccurrences(of: "\n", with: " · ")
+                    self?.vmStatusLabel.toolTip = message
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self?.deletingVM = false
+                    self?.vmStatusLabel.stringValue = "Could not delete VM: \(error.localizedDescription)"
+                    if let self {
+                        self.deleteVMButton.isEnabled = self.vmRecords.indices.contains(self.vmTableView.selectedRow)
+                    }
+                }
+            }
+        }
     }
 
     @objc private func addFolder() {
@@ -176,7 +341,12 @@ final class VibeSettingsWindowController: NSWindowController, NSTableViewDataSou
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int {
-        folders.count
+        tableView === vmTableView ? vmRecords.count : folders.count
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        guard notification.object as? NSTableView === vmTableView else { return }
+        deleteVMButton.isEnabled = !deletingVM && vmRecords.indices.contains(vmTableView.selectedRow)
     }
 
     func tableView(
@@ -184,7 +354,7 @@ final class VibeSettingsWindowController: NSWindowController, NSTableViewDataSou
         viewFor tableColumn: NSTableColumn?,
         row: Int
     ) -> NSView? {
-        let identifier = NSUserInterfaceItemIdentifier("folderCell")
+        let identifier = NSUserInterfaceItemIdentifier(tableView === vmTableView ? "vmCell" : "folderCell")
         let cell = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView
             ?? NSTableCellView()
         cell.identifier = identifier
@@ -200,16 +370,30 @@ final class VibeSettingsWindowController: NSWindowController, NSTableViewDataSou
             ])
             cell.textField = textField
         }
-        textField.stringValue = folders[row]
+        if tableView === vmTableView {
+            textField.stringValue = tableColumn?.identifier.rawValue == "createdAt"
+                ? vmRecords[row].created_at
+                : vmRecords[row].folder_path
+            textField.lineBreakMode = .byTruncatingMiddle
+        } else {
+            textField.stringValue = folders[row]
+        }
         return cell
     }
 
-    private var mountedFoldersURL: URL {
+    private var cacheDirectoryURL: URL {
         let cacheDirectory = ProcessInfo.processInfo.environment["XDG_CACHE_HOME"]
             .map { URL(fileURLWithPath: $0, isDirectory: true) }
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".cache", isDirectory: true)
-        return cacheDirectory
-            .appendingPathComponent("vibe", isDirectory: true)
+        return cacheDirectory.appendingPathComponent("vibe", isDirectory: true)
+    }
+
+    private var vmRegistryURL: URL {
+        cacheDirectoryURL.appendingPathComponent("vm_registry.json")
+    }
+
+    private var mountedFoldersURL: URL {
+        cacheDirectoryURL
             .appendingPathComponent("main", isDirectory: true)
             .appendingPathComponent("mounted-folders.txt")
     }
