@@ -547,6 +547,13 @@ Commands
                         }
                     }
                     directory_shares.extend(main_directory_shares.iter().cloned());
+                    for share in &main_directory_shares {
+                        let exclude_file = share.guest.join(".aiexclude");
+                        let exclude_file = shell_single_quote(&exclude_file.to_string_lossy());
+                        login_actions.push(Send(format!(
+                            " if [ -x /root/.aiexclude_mounts.sh ] && [ -f '{exclude_file}' ]; then /root/.aiexclude_mounts.sh '{exclude_file}'; fi"
+                        )));
+                    }
                 } else {
                     login_actions
                         .push(Send(format!(" cd '{}'", shell_single_quote(&project_name))));
