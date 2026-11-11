@@ -270,7 +270,7 @@ final class VibeSettingsWindowController: NSWindowController, NSTableViewDataSou
         tableView.reloadData()
     }
 
-    @objc private func loadFolders() {
+    @objc func loadFolders() {
         do {
             let content = try String(contentsOf: mountedFoldersURL, encoding: .utf8)
             comments = content.split(whereSeparator: \.isNewline).compactMap { line in

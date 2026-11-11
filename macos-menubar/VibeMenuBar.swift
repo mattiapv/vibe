@@ -104,6 +104,7 @@ final class VibeMenuBarDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openSettings() {
         if let settingsWindowController {
+            settingsWindowController.loadFolders()
             settingsWindowController.loadVMs()
             NSApp.activate(ignoringOtherApps: true)
             settingsWindowController.showWindow(nil)
