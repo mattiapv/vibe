@@ -631,7 +631,10 @@ Commands
 
             if let Some(config) = supervisor {
                 let disk_lock = ssh_runtime::acquire_disk_lock(&disk_path)?;
-                vm_registry::record_vm_launch(&cache_dir, &project_root)?;
+                // The main instance lives in the cache dir and is not a user project, so keep it out of `vibe ls`.
+                if !main_instance {
+                    vm_registry::record_vm_launch(&cache_dir, &project_root)?;
+                }
                 let (control_tx, control_rx) = mpsc::channel();
                 let runtime = ssh_runtime::SupervisorRuntime::start(
                     &cache_dir,
